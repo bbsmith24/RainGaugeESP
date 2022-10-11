@@ -1,35 +1,50 @@
 /*********
   Rui Santos
-  Complete project details at https://randomnerdtutorials.com/esp8266-dht11dht22-temperature-and-humidity-web-server-with-arduino-ide/
+  Complete instructions at https://RandomNerdTutorials.com/esp32-wi-fi-manager-asyncwebserver/
+  
+  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
+  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 *********/
 
-// Import required libraries
+#include <Arduino.h>
 #include <WiFi.h>
-#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <time.h>
-//#include <Arduino.h>
-//#include <ESP8266WiFi.h>
-//#include <Hash.h>
-//#include <ESPAsyncTCP.h>
-//#include <ESPAsyncWebServer.h>
-
-// Replace with your network credentials
-const char* ssid = "FamilyRoom";
-const char* password = "ZoeyDora48375";
-//const char* ssid = "NoviDems_Guest";
-//const char* password = "NoviDems48375";
+#include <AsyncTCP.h>
+#include "SPIFFS.h"
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
-/*****************************************/
-ICACHE_RAM_ATTR void RainGaugeTrigger();
-// 
-// function prototypes
-//
-void ConnectToWiFi(const char *, const char *);
-void ScanWiFi();
-void UpdateLocalTime();
+
+// Search for parameter in HTTP POST request
+const char* PARAM_INPUT_1 = "ssid";
+const char* PARAM_INPUT_2 = "pass";
+const char* PARAM_INPUT_3 = "ip";
+const char* PARAM_INPUT_4 = "gateway";
+
+
+//Variables to save values from HTML form
+String ssid;
+String pass;
+String ip;
+String gateway;
+
+// File paths to save input values permanently
+const char* ssidPath = "/ssid.txt";
+const char* passPath = "/pass.txt";
+const char* ipPath = "/ip.txt";
+const char* gatewayPath = "/gateway.txt";
+
+IPAddress localIP;
+//IPAddress localIP(192, 168, 1, 200); // hardcoded
+
+// Set your Gateway IP address
+IPAddress localGateway;
+//IPAddress localGateway(192, 168, 1, 1); //hardcoded
+IPAddress subnet(255, 255, 0, 0);
+
+// Timer variables
+unsigned long previousMillis = 0;
+const long interval = 10000;  // interval to wait for Wi-Fi connection (milliseconds)
 
 // NTP Server Details
 const char* ntpServer = "pool.ntp.org";
@@ -76,24 +91,172 @@ int ledState = 1;
 unsigned long currentTime = 0;
 
 volatile bool clicked = false;
+// Set LED GPIO
+//const int ledPin = 2;
+// Stores LED state
 
-// Set your Static IP address
-IPAddress local_IP(192, 168, 1, 143);
-// Set your Gateway IP address
-IPAddress gateway(192, 168, 1, 1);
+//String ledState;
+//
+// counter (pin low->high) interrupt handler
+// add 1 count to 
+//    current minute
+//    past 24 hours
+//    day
+//
+ICACHE_RAM_ATTR void RainGaugeTrigger()
+{
+  if(digitalRead(RAINGAUGE_PIN) == LOW)
+  {
+    clicked = true;
+    Serial.printf("LOW %d", micros());
+  }
+}
+//
+// scan for wifi access points
+//
+void ScanWiFi()
+{
+    Serial.println("WiFi scan start");
 
-IPAddress subnet(255, 255, 0, 0);
-IPAddress primaryDNS(8, 8, 8, 8);   //optional
-IPAddress secondaryDNS(8, 8, 4, 4); //optional
-/*****************************************/
+  // WiFi.scanNetworks will return the number of networks found
+  int n = WiFi.scanNetworks();
+  Serial.println("scan done");
+  if (n == 0) 
+  {
+      Serial.println("no networks found");
+  }
+  else 
+  {
+    Serial.print(n);
+    Serial.println(" networks found");
+    for (int i = 0; i < n; ++i) {
+      // Print SSID and RSSI for each network found
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(")");
+      Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
+      delay(10);
+    }
+  }
+}
+//
+//
+//
+void UpdateLocalTime()
+{
+  struct tm timeinfo;
+  getLocalTime(&timeinfo);
 
-// Generally, you should use "unsigned long" for variables that hold time
-// The value will quickly become too large for an int to store
-unsigned long previousMillis = 0;    // will store last time DHT was updated
+  //GET DATE
+  //Get full weekday name
+  char weekDay[10];
+  strftime(weekDay, sizeof(weekDay), "%a", &timeinfo);
+  //Get day of month
+  char dayMonth[4];
+  strftime(dayMonth, sizeof(dayMonth), "%d", &timeinfo);
+  //Get abbreviated month name
+  char monthName[5];
+  strftime(monthName, sizeof(monthName), "%b", &timeinfo);
+  //Get year
+  char year[6];
+  strftime(year, sizeof(year), "%Y", &timeinfo);
 
-// Updates every 10 seconds
-const long interval = 10000;  
+  //GET TIME
+  //Get hour (12 hour format)
+  /*char hour[4];
+  strftime(hour, sizeof(hour), "%I", &timeinfo);*/
+  
+  //Get hour (24 hour format)
+  char hour[4];
+  strftime(hour, sizeof(hour), "%H", &timeinfo);
+  //Get minute
+  char minute[4];
+  strftime(minute, sizeof(minute), "%M", &timeinfo);
+  char second[4];
+  strftime(second, sizeof(second), "%S", &timeinfo);
 
+  sprintf(localTimeStr, "%s %s %s %s %s:%s", weekDay, monthName, dayMonth, year, hour, minute);
+}
+//
+// Initialize SPIFFS
+//
+void initSPIFFS() {
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An error has occurred while mounting SPIFFS");
+  }
+  Serial.println("SPIFFS mounted successfully");
+}
+
+// Read File from SPIFFS
+String readFile(fs::FS &fs, const char * path){
+  Serial.printf("Reading file: %s\r\n", path);
+
+  File file = fs.open(path);
+  if(!file || file.isDirectory()){
+    Serial.println("- failed to open file for reading");
+    return String();
+  }
+  
+  String fileContent;
+  while(file.available()){
+    fileContent = file.readStringUntil('\n');
+    break;     
+  }
+  return fileContent;
+}
+
+// Write file to SPIFFS
+void writeFile(fs::FS &fs, const char * path, const char * message){
+  Serial.printf("Writing file: %s\r\n", path);
+
+  File file = fs.open(path, FILE_WRITE);
+  if(!file){
+    Serial.println("- failed to open file for writing");
+    return;
+  }
+  if(file.print(message)){
+    Serial.println("- file written");
+  } else {
+    Serial.println("- frite failed");
+  }
+}
+
+// Initialize WiFi
+bool initWiFi() {
+  if(ssid=="" || ip==""){
+    Serial.println("Undefined SSID or IP address.");
+    return false;
+  }
+
+  WiFi.mode(WIFI_STA);
+  localIP.fromString(ip.c_str());
+  localGateway.fromString(gateway.c_str());
+
+
+  if (!WiFi.config(localIP, localGateway, subnet)){
+    Serial.println("STA Failed to configure");
+    return false;
+  }
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  Serial.println("Connecting to WiFi...");
+
+  unsigned long currentMillis = millis();
+  previousMillis = currentMillis;
+
+  while(WiFi.status() != WL_CONNECTED) {
+    currentMillis = millis();
+    if (currentMillis - previousMillis >= interval) {
+      Serial.println("Failed to connect.");
+      return false;
+    }
+  }
+
+  Serial.println(WiFi.localIP());
+  return true;
+}
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
@@ -192,7 +355,9 @@ setInterval(function ( )
 </script>
 </html>)rawliteral";
 
+// 
 // Replaces placeholder with sensor values
+//
 String processor(const String& var)
 {
   //Serial.println(var);
@@ -211,11 +376,11 @@ String processor(const String& var)
   return String();
 }
 
-void setup()
+void setup() 
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
-  delay(1000);
+
   /*****************************************************/
   pinMode(LED_PIN, OUTPUT);
   Serial.println("BBS Sept 2022");
@@ -237,52 +402,98 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
   /*****************************************************/
 
-  // scan available wifi
-  ScanWiFi();
-  // Connect to Wi-Fi
-  ConnectToWiFi(ssid, password);
-/*  
-  WiFi.begin(ssid, password);
-  Serial.println("Connecting to WiFi");
-  int attemptCount = 0;
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.print(".");
-    attemptCount++;
-    if(attemptCount % 10 == 0)
+  initSPIFFS();
+  
+  // Load values saved in SPIFFS
+  ssid = readFile(SPIFFS, ssidPath);
+  pass = readFile(SPIFFS, passPath);
+  ip = readFile(SPIFFS, ipPath);
+  gateway = readFile (SPIFFS, gatewayPath);
+  Serial.println(ssid);
+  Serial.println(pass);
+  Serial.println(ip);
+  Serial.println(gateway);
+
+  if(initWiFi()) 
+  {
+    // Route for root / web page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) 
     {
-      Serial.println();
-    }
+      request->send(SPIFFS, "/index.html", "text/html", false, processor);
+    });
+    server.serveStatic("/", SPIFFS, "/");
+    
+
+    server.begin();
   }
-  Serial.println();
-  Serial.print("Connected as ");
-  Serial.println(WiFi.localIP());
-*/
-  // Route for root / web page
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", index_html, processor);
-  });
-  server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/plain", String(lastQuarterRainInches).c_str());
-  });
-  server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/plain", String(lastDayRainInches).c_str());
-  });
-  server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/plain", String(lastHourRainInches).c_str());
-  });
-  server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/plain", String(localTimeStr).c_str());
-  });
+  else 
+  {
+    // Connect to Wi-Fi network with SSID and password
+    Serial.println("Setting AP (Access Point)");
+    // NULL sets an open Access Point
+    WiFi.softAP("ESP-WIFI-MANAGER", NULL);
 
-  // Start server
-  server.begin();
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP IP address: ");
+    Serial.println(IP); 
 
-  // Init and get the time
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-
+    // Web Server Root URL
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+    {
+      request->send(SPIFFS, "/wifimanager.html", "text/html");
+    });
+    
+    server.serveStatic("/", SPIFFS, "/");
+    
+    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) 
+    {
+      int params = request->params();
+      for(int i=0;i<params;i++){
+        AsyncWebParameter* p = request->getParam(i);
+        if(p->isPost()){
+          // HTTP POST ssid value
+          if (p->name() == PARAM_INPUT_1) {
+            ssid = p->value().c_str();
+            Serial.print("SSID set to: ");
+            Serial.println(ssid);
+            // Write file to save value
+            writeFile(SPIFFS, ssidPath, ssid.c_str());
+          }
+          // HTTP POST pass value
+          if (p->name() == PARAM_INPUT_2) {
+            pass = p->value().c_str();
+            Serial.print("Password set to: ");
+            Serial.println(pass);
+            // Write file to save value
+            writeFile(SPIFFS, passPath, pass.c_str());
+          }
+          // HTTP POST ip value
+          if (p->name() == PARAM_INPUT_3) {
+            ip = p->value().c_str();
+            Serial.print("IP Address set to: ");
+            Serial.println(ip);
+            // Write file to save value
+            writeFile(SPIFFS, ipPath, ip.c_str());
+          }
+          // HTTP POST gateway value
+          if (p->name() == PARAM_INPUT_4) {
+            gateway = p->value().c_str();
+            Serial.print("Gateway set to: ");
+            Serial.println(gateway);
+            // Write file to save value
+            writeFile(SPIFFS, gatewayPath, gateway.c_str());
+          }
+          //Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+        }
+      }
+      request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
+      delay(3000);
+      ESP.restart();
+    });
+    server.begin();
+  }
 }
- 
+
 void loop()
 {
   // rain gauge click
@@ -302,11 +513,6 @@ void loop()
   {
     lastUpdateMillis = millis();
     // check for wifi
-    if (WiFi.status() != WL_CONNECTED) 
-    {
-      // Connect to Wi-Fi
-      ConnectToWiFi(ssid, password);
-    }
     UpdateLocalTime();
     // update count for last minute
     rainForLastMinute = rainByMinute[rainByMinuteIdx];
@@ -388,124 +594,4 @@ void loop()
       rainByDay[rainByDayIdx] = 0;
     }
   }
-}
-//
-//
-//
-void ConnectToWiFi(const char * ssid, const char * pwd)
-{
-  int ledState = 0;
-
-  Serial.println("\nConnecting to WiFi network: " + String(ssid) + " >" + String(password) + "<");
-  WiFi.mode(WIFI_STA);
-
-  // Configures static IP address
-  //if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
-  //  Serial.println("STA Failed to configure");
-  //}
-  String hostName = "ESP32 Weather";
-  WiFi.setHostname(hostName.c_str());
-    
-  WiFi.begin(ssid, pwd);
-  delay(1000);
-  int countAttempts = 1;
-  while (WiFi.status() != WL_CONNECTED) 
-  {
-    Serial.print(".");
-    if(countAttempts % 50 == 0)
-    {
-      Serial.println();
-    }
-    countAttempts++;
-    // Blink LED while we're connecting:
-    digitalWrite(LED_PIN, ledState);
-    ledState = (ledState + 1) % 2; // Flip ledState
-    delay(1000);
-  }
-
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-}
-//
-// counter (pin low->high) interrupt handler
-// add 1 count to 
-//    current minute
-//    past 24 hours
-//    day
-//
-ICACHE_RAM_ATTR void RainGaugeTrigger()
-{
-  if(digitalRead(RAINGAUGE_PIN) == LOW)
-  {
-    clicked = true;
-    Serial.printf("LOW %d", micros());
-  }
-}
-void ScanWiFi()
-{
-  Serial.println("WiFi scan start");
-
-  // WiFi.scanNetworks will return the number of networks found
-  int n = WiFi.scanNetworks();
-  Serial.println("scan done");
-  if (n == 0) 
-  {
-      Serial.println("no networks found");
-  }
-  else 
-  {
-    Serial.print(n);
-    Serial.println(" networks found");
-    for (int i = 0; i < n; ++i) {
-      // Print SSID and RSSI for each network found
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" (");
-      Serial.print(WiFi.RSSI(i));
-      Serial.print(")");
-      Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
-      delay(10);
-    }
-  }
-}
-//
-//
-//
-void UpdateLocalTime()
-{
-  struct tm timeinfo;
-  getLocalTime(&timeinfo);
-
-  //GET DATE
-  //Get full weekday name
-  char weekDay[10];
-  strftime(weekDay, sizeof(weekDay), "%a", &timeinfo);
-  //Get day of month
-  char dayMonth[4];
-  strftime(dayMonth, sizeof(dayMonth), "%d", &timeinfo);
-  //Get abbreviated month name
-  char monthName[5];
-  strftime(monthName, sizeof(monthName), "%b", &timeinfo);
-  //Get year
-  char year[6];
-  strftime(year, sizeof(year), "%Y", &timeinfo);
-
-  //GET TIME
-  //Get hour (12 hour format)
-  /*char hour[4];
-  strftime(hour, sizeof(hour), "%I", &timeinfo);*/
-  
-  //Get hour (24 hour format)
-  char hour[4];
-  strftime(hour, sizeof(hour), "%H", &timeinfo);
-  //Get minute
-  char minute[4];
-  strftime(minute, sizeof(minute), "%M", &timeinfo);
-  char second[4];
-  strftime(second, sizeof(second), "%S", &timeinfo);
-
-  sprintf(localTimeStr, "%s %s %s %s %s:%s", weekDay, monthName, dayMonth, year, hour, minute);
 }
