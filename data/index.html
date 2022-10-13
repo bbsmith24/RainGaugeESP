@@ -21,7 +21,7 @@
   </style>
 </head>
 <body>
-  <h2>Rain Gauge ESP32</h2>
+  <h2>Rain Gauge</h2>
   <p>
     <i class="fas fa-tint" style="color:#00add6;"></i> 
     <span class="gaugeLabels">15 Minutes</span> 
@@ -57,7 +57,7 @@ setInterval(function ( ) {
   };
   xhttp.open("GET", "/quarterHour", true);
   xhttp.send();
-}, 10000 );
+}, 5000 );
 
 setInterval(function ( ) {
   var xhttp = new XMLHttpRequest();
@@ -68,10 +68,9 @@ setInterval(function ( ) {
   };
   xhttp.open("GET", "/day", true);
   xhttp.send();
-}, 10000 );
+}, 5000 );
 
-setInterval(function ( ) 
-{
+setInterval(function ( ) {
   var xhttp = new XMLHttpRequest();
   xhttp.onreadystatechange = function() {
     if (this.readyState == 4 && this.status == 200) {
@@ -80,10 +79,9 @@ setInterval(function ( )
   };
   xhttp.open("GET", "/lastHour", true);
   xhttp.send();
-}, 10000 );
+}, 5000 );
 
-setInterval(function ( ) 
-{
+setInterval(function ( ) {
   var xhttp = new XMLHttpRequest();
   xhttp.onreadystatechange = function() {
     if (this.readyState == 4 && this.status == 200) {
@@ -92,6 +90,6 @@ setInterval(function ( )
   };
   xhttp.open("GET", "/dateTime", true);
   xhttp.send();
-}, 10000 );
+}, 5000 );
 </script>
 </html>

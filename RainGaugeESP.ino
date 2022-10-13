@@ -11,6 +11,8 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include "SPIFFS.h"
+#include <time.h>
+#include <ESP32Ping.h>
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -34,14 +36,16 @@ const char* passPath = "/pass.txt";
 const char* ipPath = "/ip.txt";
 const char* gatewayPath = "/gateway.txt";
 
-IPAddress localIP;
-//IPAddress localIP(192, 168, 1, 200); // hardcoded
 
-// Set your Gateway IP address
-IPAddress localGateway;
-//IPAddress localGateway(192, 168, 1, 1); //hardcoded
-IPAddress subnet(255, 255, 0, 0);
-
+// Set your local IP, gateway IP, subnet mask
+//IPAddress localGateway;
+//IPAddress localIP;
+//IPAddress subnet;
+// hardcoded
+IPAddress localGateway(192, 168, 1, 1);
+IPAddress localIP(192, 168, 1, 200); 
+IPAddress subnet(255, 255, 255, 0);
+IPAddress dnsServer(8,8,8,8);
 // Timer variables
 unsigned long previousMillis = 0;
 const long interval = 10000;  // interval to wait for Wi-Fi connection (milliseconds)
@@ -89,7 +93,6 @@ float lastDayRainInches = 0.0;
 unsigned long lastUpdateMillis;
 int ledState = 1;
 unsigned long currentTime = 0;
-
 volatile bool clicked = false;
 // Set LED GPIO
 //const int ledPin = 2;
@@ -148,8 +151,11 @@ void ScanWiFi()
 void UpdateLocalTime()
 {
   struct tm timeinfo;
-  getLocalTime(&timeinfo);
-
+  if(!getLocalTime(&timeinfo)){
+    // Init timeserver
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    getLocalTime(&timeinfo);
+  }
   //GET DATE
   //Get full weekday name
   char weekDay[10];
@@ -179,11 +185,15 @@ void UpdateLocalTime()
   strftime(second, sizeof(second), "%S", &timeinfo);
 
   sprintf(localTimeStr, "%s %s %s %s %s:%s", weekDay, monthName, dayMonth, year, hour, minute);
+
+  //Serial.print("Current time: ");
+  //Serial.println(localTimeStr);
 }
 //
 // Initialize SPIFFS
 //
-void initSPIFFS() {
+void initSPIFFS() 
+{
   if (!SPIFFS.begin(true)) {
     Serial.println("An error has occurred while mounting SPIFFS");
   }
@@ -191,7 +201,8 @@ void initSPIFFS() {
 }
 
 // Read File from SPIFFS
-String readFile(fs::FS &fs, const char * path){
+String readFile(fs::FS &fs, const char * path)
+{
   Serial.printf("Reading file: %s\r\n", path);
 
   File file = fs.open(path);
@@ -209,7 +220,8 @@ String readFile(fs::FS &fs, const char * path){
 }
 
 // Write file to SPIFFS
-void writeFile(fs::FS &fs, const char * path, const char * message){
+void writeFile(fs::FS &fs, const char * path, const char * message)
+{
   Serial.printf("Writing file: %s\r\n", path);
 
   File file = fs.open(path, FILE_WRITE);
@@ -223,41 +235,62 @@ void writeFile(fs::FS &fs, const char * path, const char * message){
     Serial.println("- frite failed");
   }
 }
-
+//
 // Initialize WiFi
-bool initWiFi() {
-  if(ssid=="" || ip==""){
+//
+bool initWiFi() 
+{
+  if(ssid=="" || ip=="")
+  {
     Serial.println("Undefined SSID or IP address.");
     return false;
   }
 
   WiFi.mode(WIFI_STA);
-  localIP.fromString(ip.c_str());
-  localGateway.fromString(gateway.c_str());
 
+  ScanWiFi();
 
-  if (!WiFi.config(localIP, localGateway, subnet)){
-    Serial.println("STA Failed to configure");
-    return false;
-  }
   WiFi.begin(ssid.c_str(), pass.c_str());
   Serial.println("Connecting to WiFi...");
 
   unsigned long currentMillis = millis();
   previousMillis = currentMillis;
 
-  while(WiFi.status() != WL_CONNECTED) {
+  while(WiFi.status() != WL_CONNECTED) 
+  {
     currentMillis = millis();
-    if (currentMillis - previousMillis >= interval) {
+    if (currentMillis - previousMillis >= interval) 
+    {
       Serial.println("Failed to connect.");
       return false;
     }
   }
 
+  Serial.println("Connected!");
+  Serial.print("Gateway: ");
+  Serial.println(WiFi.gatewayIP());
+  Serial.print("Local: ");
   Serial.println(WiFi.localIP());
+  Serial.print("Subnet: ");
+  Serial.println(WiFi.subnetMask());
+  
+  const char* remote_host = "www.google.com";
+  if (Ping.ping(remote_host)) 
+  {
+    Serial.println("Ping SUCCESS!");
+  } else {
+    Serial.println("Ping FAIL!");
+  }
+  // Init and get the time
+  UpdateLocalTime();
   return true;
 }
-const char index_html[] PROGMEM = R"rawliteral(
+//
+//
+//
+/*
+const char index_html[] PROGMEM = R"rawliteral
+(
 <!DOCTYPE HTML><html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -354,7 +387,7 @@ setInterval(function ( )
 }, 10000 );
 </script>
 </html>)rawliteral";
-
+*/
 // 
 // Replaces placeholder with sensor values
 //
@@ -362,16 +395,28 @@ String processor(const String& var)
 {
   //Serial.println(var);
   if(var == "QUARTERHOUR"){
+Serial.println("QUARTERHOUR request");
     return String(currentRainInches);
   }
   else if(var == "LASTHOUR"){
+Serial.println("LASTHOUR request");
     return String(lastHourRainInches);
   }
   else if(var == "DAY"){
+Serial.println("DAY request");
     return String(lastDayRainInches);
   }
-  else if(var == "DATETIME"){
+  else if(var == "DATETIME")
+  {
+Serial.println("DATETIME request");
     return String(localTimeStr);
+  }
+  else
+  {
+    Serial.print("Unknown ");
+    Serial.print(var);
+    Serial.println(" request");
+    return "ERROR";
   }
   return String();
 }
@@ -380,11 +425,14 @@ void setup()
 {
   // Serial port for debugging purposes
   Serial.begin(115200);
+  delay(1000);
 
   /*****************************************************/
   pinMode(LED_PIN, OUTPUT);
+  Serial.println("");
   Serial.println("BBS Sept 2022");
   Serial.println("Rain gauge website host");
+  Serial.println("=======================");
   for(int idx = 0; idx < MIN_PER_DAY; idx++)
   {
     rainByMinute[idx] = 0;
@@ -409,22 +457,30 @@ void setup()
   pass = readFile(SPIFFS, passPath);
   ip = readFile(SPIFFS, ipPath);
   gateway = readFile (SPIFFS, gatewayPath);
-  Serial.println(ssid);
-  Serial.println(pass);
-  Serial.println(ip);
-  Serial.println(gateway);
-
   if(initWiFi()) 
   {
-    // Route for root / web page
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) 
+    // Web Server Root URL
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
     {
-      request->send(SPIFFS, "/index.html", "text/html", false, processor);
-    });
-    server.serveStatic("/", SPIFFS, "/");
-    
+      request->send(SPIFFS, "/index.html", "text/html");
+    });    
+     server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
+       request->send_P(200, "text/plain", String(lastQuarterRainInches).c_str());
+     });
+     server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
+       request->send_P(200, "text/plain", String(lastDayRainInches).c_str());
+     });
+     server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
+       request->send_P(200, "text/plain", String(lastHourRainInches).c_str());
+     });
+     server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
+       request->send_P(200, "text/plain", String(localTimeStr).c_str());
+     });
 
+  // Start server
     server.begin();
+
+    UpdateLocalTime();
   }
   else 
   {
@@ -491,6 +547,8 @@ void setup()
       ESP.restart();
     });
     server.begin();
+
+    UpdateLocalTime();
   }
 }
 
