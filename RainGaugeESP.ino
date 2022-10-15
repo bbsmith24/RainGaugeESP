@@ -1,9 +1,11 @@
 /*********
-  Rui Santos
-  Complete instructions at https://RandomNerdTutorials.com/esp32-wi-fi-manager-asyncwebserver/
-  
-  Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files.
-  The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+  Brian Smith
+  10/2022
+
+  IOT Rain Gauge
+  Serves a web page, connects to MQTT server, push data to weather underground
+  Serves a web page for ssid/password if not previously stored to SPIFFS
+
 *********/
 
 #include <Arduino.h>
@@ -26,7 +28,6 @@ const char* PARAM_INPUT_1 = "ssid";
 const char* PARAM_INPUT_2 = "pass";
 const char* PARAM_INPUT_3 = "ip";
 const char* PARAM_INPUT_4 = "gateway";
-
 
 //Variables to save values from HTML form
 String ssid;
@@ -117,6 +118,11 @@ String subscribed_topic[MAX_SUBSCRIBE];
 String published_topic[MAX_PUBLISH];
 String published_payload[MAX_PUBLISH];
 char payloadStr[512];
+// Weather underground credentials
+String WUndergroundID = "KMINOVI53";
+String WUndergroundKey = "fQnoqk2e";  
+const char* host = "weatherstation.wunderground.com";
+
 //
 // counter (pin low->high) interrupt handler
 // add 1 count to 
@@ -651,13 +657,76 @@ void loop()
       rainByDayIdx = rainByDayIdx + 1 < LAST_X_DAYS ? rainByDayIdx + 1 : 0;
       rainByDay[rainByDayIdx] = 0;
     }
+    //
+    // MQTT update
+    //    
     published_payload[0] = String(localTimeStr);
     published_payload[1] = String(lastQuarterRainInches, 4);
     published_payload[2] = String(lastHourRainInches, 4);
     published_payload[3] = String(lastDayRainInches, 4);
     published_payload[4] = String(payloadStr);
-
     MQTT_PublishTopics();    
+    //
+    // Weather Underground update
+    //
+    // Set up the generic use-every-time part of the URL
+    String url = "/weatherstation/updateweatherstation.php";
+    url += "?ID=";
+    url += WUndergroundID;
+    url += "&PASSWORD=";
+    url += WUndergroundKey;
+    url += "&dateutc=now&action=updateraw";
+
+    // Now let's add in the data that we've collected from our sensors
+    // Start with rain in last hour/day
+    url += "&rainin=";
+    url += lastHourRainInches;
+    url += "&dailyrainin=";
+    url += lastDayRainInches;
+    // Connnect to Weather Underground. If the connection fails, return from
+    //  loop and start over again.
+    if (!wifiClient.connect(host, 80))
+    {
+#ifdef VERBOSE      
+      Serial.println("Connection failed");
+#endif
+      return;
+    }
+    else
+    {
+#ifdef VERBOSE      
+      Serial.println("Connection succeeded");
+#endif
+    }
+
+    // Issue the GET command to Weather Underground to post the data we've 
+    //  collected.
+    wifiClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
+                 "Host: " + host + "\r\n" +
+                 "Connection: close\r\n\r\n");
+
+    // Give Weather Underground five seconds to reply.
+    unsigned long timeout = millis();
+    while (wifiClient.available() == 0) 
+    {
+      if (millis() - timeout > 5000) 
+      {
+#ifdef VERBOSE      
+          Serial.println(">>> Client Timeout !");
+#endif
+          wifiClient.stop();
+          return;
+      }
+    }
+
+    // Read the response from Weather Underground and print it to the console.
+    while(wifiClient.available()) 
+    {
+      String line = wifiClient.readStringUntil('\r');
+#ifdef VERBOSE      
+      Serial.print(line);
+#endif      
+    }
   }
 }
 //****************************************************************************
