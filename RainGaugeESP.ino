@@ -16,6 +16,8 @@
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>
 
+//#define VERBOSE
+
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 
@@ -59,7 +61,6 @@ char localTimeStr[256];
 #define LAST_X_HOURS 24
 #define INCHES_PER_CLICK 0.011F
 #define INTERVAL_MS 60000  // 1 minute interval
-#define VERBOSE
 // for devkit c
 #define RAINGAUGE_PIN 13 
 #define LED_PIN 2
