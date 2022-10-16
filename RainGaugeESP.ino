@@ -792,22 +792,24 @@ void MQTT_Reconnect()
   {
     mqttConnect = true;
   }
-#ifdef VERBOSE
   if(mqttConnect)
   {
+#ifdef VERBOSE
     Serial.print("MQTT connected as ");
     Serial.println(mqttClientID.c_str());
+#endif
     sprintf(mqttState, "%s connected", mqttClientID.c_str());
   }
   else
   {
+#ifdef VERBOSE
     Serial.print("MQTT not connected - ");
     Serial.print(attemptCount);
     Serial.print(" attempts");
     Serial.println(mqttClientID.c_str());
+#endif
     sprintf(mqttState, "not connected after %d attempts", attemptCount);
   }
-#endif
 
   // we're connected, indicator on 
   delay(2000);
