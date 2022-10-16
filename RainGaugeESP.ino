@@ -19,6 +19,7 @@
 #include <PubSubClient.h>
 
 //#define VERBOSE
+#define WEATHER_UNDERGROUND
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
@@ -122,6 +123,10 @@ char payloadStr[512];
 String WUndergroundID = "KMINOVI53";
 String WUndergroundKey = "fQnoqk2e";  
 const char* host = "weatherstation.wunderground.com";
+
+char wifiState[256];
+char mqttState[256];
+char wundergroundState[256];
 
 //
 // counter (pin low->high) interrupt handler
@@ -324,6 +329,8 @@ bool initWiFi()
   Serial.print("Subnet: ");
   Serial.println(WiFi.subnetMask());
 #endif
+  sprintf(wifiState, "IP %s", WiFi.localIP().toString().c_str()); 
+
 
 #ifdef DEBUG_WIFI 
   char remote_host[512];
@@ -411,6 +418,10 @@ void setup()
   // Serial port for debugging purposes
   Serial.begin(115200);
   delay(1000);
+  
+  sprintf(wifiState, "not connected");
+  sprintf(mqttState, "not connected");
+  sprintf(wundergroundState, "no attempts to update");
 
   /*****************************************************/
   pinMode(LED_PIN, OUTPUT);
@@ -433,7 +444,7 @@ void setup()
     rainByDay[idx] = 0;
   }
   // set up the rising edge interrupt for the rain sensor
-  pinMode(RAINGAUGE_PIN, INPUT);
+  pinMode(RAINGAUGE_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
   /*****************************************************/
 
@@ -472,6 +483,7 @@ void setup()
   pass = readFile(SPIFFS, passPath);
   ip = readFile(SPIFFS, ipPath);
   gateway = readFile (SPIFFS, gatewayPath);
+  // wifi connected
   if(initWiFi()) 
   {
     // Web Server Root URL
@@ -479,26 +491,26 @@ void setup()
     {
       request->send(SPIFFS, "/index.html", "text/html");
     });    
-     server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
+    server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
        request->send_P(200, "text/plain", String(lastQuarterRainInches).c_str());
-     });
-     server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
+    });
+    server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
        request->send_P(200, "text/plain", String(lastDayRainInches).c_str());
-     });
-     server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
+    });
+    server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
        request->send_P(200, "text/plain", String(lastHourRainInches).c_str());
-     });
-     server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
+    });
+    server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
        request->send_P(200, "text/plain", String(localTimeStr).c_str());
-     });
-
+    });
   // Start server
     server.begin();
-
-    UpdateLocalTime();
   }
+  // wifi not connected  
   else 
   {
+    while(true)
+    {
     // Connect to Wi-Fi network with SSID and password
 #ifdef VERBOSE
     Serial.println("Setting AP (Access Point)");
@@ -571,9 +583,12 @@ void setup()
       delay(3000);
       ESP.restart();
     });
-    server.begin();
-    delay(2000);  
-    UpdateLocalTime();
+      Serial.print(".");
+      delay(1000);
+    }
+    //server.begin();
+    //delay(2000);  
+    //UpdateLocalTime();
   }
 }
 //
@@ -631,10 +646,9 @@ void loop()
     lastHourRainInches = (float)rainForLastHour * INCHES_PER_CLICK;
     currentTime = millis();
     
-    sprintf(payloadStr,"%s\t%0.4f\t%0.4f\t%0.4f", localTimeStr, 
-                                                   lastQuarterRainInches, 
-                                                   lastHourRainInches, 
-                                                   lastDayRainInches);
+    sprintf(payloadStr,"WiFi: %s | MQTT: %s | Weather Underground: %s", wifiState, 
+                                                                        mqttState, 
+                                                                        wundergroundState);
 #ifdef VERBOSE
     Serial.println(payloadStr);
 #endif
@@ -683,22 +697,24 @@ void loop()
     url += lastHourRainInches;
     url += "&dailyrainin=";
     url += lastDayRainInches;
+#ifdef WEATHER_UNDERGROUND
     // Connnect to Weather Underground. If the connection fails, return from
     //  loop and start over again.
     if (!wifiClient.connect(host, 80))
     {
-#ifdef VERBOSE      
-      Serial.println("Connection failed");
-#endif
+      #ifdef VERBOSE      
+      Serial.println("Weather Underground connection failed");
+      #endif
+      sprintf(wundergroundState, "Not Connected");
       return;
     }
     else
     {
-#ifdef VERBOSE      
-      Serial.println("Connection succeeded");
-#endif
+      #ifdef VERBOSE      
+      Serial.println("Weather Underground connected");
+      #endif
+      sprintf(wundergroundState, "Connected");
     }
-
     // Issue the GET command to Weather Underground to post the data we've 
     //  collected.
     wifiClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
@@ -711,10 +727,11 @@ void loop()
     {
       if (millis() - timeout > 5000) 
       {
-#ifdef VERBOSE      
+          #ifdef VERBOSE      
           Serial.println(">>> Client Timeout !");
-#endif
+          #endif
           wifiClient.stop();
+          sprintf(wundergroundState, "%s %s", wundergroundState, " Client timeout");          
           return;
       }
     }
@@ -723,10 +740,12 @@ void loop()
     while(wifiClient.available()) 
     {
       String line = wifiClient.readStringUntil('\r');
-#ifdef VERBOSE      
+      #ifdef VERBOSE      
       Serial.print(line);
-#endif      
+      #endif      
+      sprintf(wundergroundState, "%s", "Client responded");          
     }
+#endif
   }
 }
 //****************************************************************************
@@ -738,8 +757,11 @@ void MQTT_Reconnect()
 {
   // Loop until we're reconnected
   int blinkVal = HIGH;
-  while (!mqttClient.connected()) 
+  int attemptCount = 0;
+  bool mqttConnect = true;
+  while (!mqttClient.connected() && (attemptCount < 10)) 
   {
+    mqttConnect = false;
 #ifdef VERBOSE
     Serial.print("mqttClientID: ");
     Serial.println(mqttClientID);
@@ -763,12 +785,29 @@ void MQTT_Reconnect()
     Serial.print("MQTT connect attempt as ");
     Serial.println(mqttClientID.c_str());
     #endif
+    attemptCount++;
+  }
+  delay(RECONNECT_DELAY);
+  if(mqttClient.connected())
+  {
+    mqttConnect = true;
   }
 #ifdef VERBOSE
-  Serial.print("MQTT connected as ");
-  Serial.println(mqttClientID.c_str());
+  if(mqttConnect)
+  {
+    Serial.print("MQTT connected as ");
+    Serial.println(mqttClientID.c_str());
+    sprintf(mqttState, "%s connected", mqttClientID.c_str());
+  }
+  else
+  {
+    Serial.print("MQTT not connected - ");
+    Serial.print(attemptCount);
+    Serial.print(" attempts");
+    Serial.println(mqttClientID.c_str());
+    sprintf(mqttState, "not connected after %d attempts", attemptCount);
+  }
 #endif
-  mqttClient.publish("Rain_Gauge", "10/14/2022 7:10:00");
 
   // we're connected, indicator on 
   delay(2000);
