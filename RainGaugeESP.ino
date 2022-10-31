@@ -12,12 +12,14 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
-#include "SPIFFS.h"
+//#include "SPIFFS.h"
 #include <time.h>        // for NTP time
 #include <ESP32Time.h>   // for RTC time
 #include <ESP32Ping.h>
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>
+
+void MQTT_Callback(char* topic, byte* payload, unsigned int length);
 
 //#define VERBOSE
 #define WEATHER_UNDERGROUND
@@ -86,11 +88,13 @@ bool rtcTimeSet = false;
 //#define MAX_UPDATE_INTERVAL_MS 600000 //   10 minute max between updates
 #define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
 // for devkit c
-#define RAINGAUGE_PIN 13 
-//#define LED_PIN 2
-// for sparkfun esp32 thing plus
-//#define RAINGAUGE_PIN 5  
+#define RAINGAUGE_PIN 14 
+// for Sparkfun ESP32 Thing Plus
 //#define LED_PIN 13
+//#define RAINGAUGE_PIN 5  
+// for Sparkfun ESP32 Thing
+//#define RAINGAUGE_PIN 5  
+#define LED_PIN 5
 #define MAX_SUBSCRIBE        10
 #define MAX_PUBLISH          10
 // wait between wifi and MQTT server connect attempts
@@ -209,6 +213,7 @@ void UpdateLocalTime()
   // if not set from NTP, get time and set RTC
   if(!rtcTimeSet)
   {
+    digitalWrite(LED_PIN, HIGH);
     #ifdef VERBOSE
     Serial.print("from NTP server ");    
     #endif
@@ -239,6 +244,7 @@ void UpdateLocalTime()
     //rtc.setTime(secondNum, minNum, hourNum, dayNum, monthNum, yearNum);
     rtc.setTimeStruct(timeinfo);
     rtcTimeSet = true;
+    digitalWrite(LED_PIN, LOW);
   }
   // use RTC for time
   else
@@ -264,74 +270,74 @@ void UpdateLocalTime()
     connectDateTimeSet = true;
   }
 }
+////
+//// Initialize SPIFFS
+////
+//void initSPIFFS() 
+//{
+//  if (!SPIFFS.begin(true)) 
+//  {
+//#ifdef VERBOSE
+//    Serial.println("An error has occurred while mounting SPIFFS");
+//#endif
+//  }
+//#ifdef VERBOSE  
+//  Serial.println("SPIFFS mounted successfully");
+//#endif  
+//}
+////
+//// Read File from SPIFFS
+////
+//String readFile(fs::FS &fs, const char * path)
+//{
+//#ifdef VERBOSE
+//  Serial.printf("Reading file: %s\r\n", path);
+//#endif
 //
-// Initialize SPIFFS
+//  File file = fs.open(path);
+//  if(!file || file.isDirectory())
+//  {
+//#ifdef VERBOSE
+//    Serial.println("- failed to open file for reading");
+//#endif
+//    return String();
+//  }
+//  
+//  String fileContent;
+//  while(file.available()){
+//    fileContent = file.readStringUntil('\n');
+//    break;     
+//  }
+//  return fileContent;
+//}
+////
+//// Write file to SPIFFS
+////
+//void writeFile(fs::FS &fs, const char * path, const char * message)
+//{
+//#ifdef VERBOSE
+//  Serial.printf("Writing file: %s\r\n", path);
+//#endif
 //
-void initSPIFFS() 
-{
-  if (!SPIFFS.begin(true)) 
-  {
-#ifdef VERBOSE
-    Serial.println("An error has occurred while mounting SPIFFS");
-#endif
-  }
-#ifdef VERBOSE  
-  Serial.println("SPIFFS mounted successfully");
-#endif  
-}
-//
-// Read File from SPIFFS
-//
-String readFile(fs::FS &fs, const char * path)
-{
-#ifdef VERBOSE
-  Serial.printf("Reading file: %s\r\n", path);
-#endif
-
-  File file = fs.open(path);
-  if(!file || file.isDirectory())
-  {
-#ifdef VERBOSE
-    Serial.println("- failed to open file for reading");
-#endif
-    return String();
-  }
-  
-  String fileContent;
-  while(file.available()){
-    fileContent = file.readStringUntil('\n');
-    break;     
-  }
-  return fileContent;
-}
-//
-// Write file to SPIFFS
-//
-void writeFile(fs::FS &fs, const char * path, const char * message)
-{
-#ifdef VERBOSE
-  Serial.printf("Writing file: %s\r\n", path);
-#endif
-
-  File file = fs.open(path, FILE_WRITE);
-  if(!file)
-  {
-#ifdef VERBOSE
-    Serial.println("- failed to open file for writing");
-#endif
-    return;
-  }
-#ifdef VERBOSE
-  if(file.print(message))
-  {
-    Serial.println("- file written");
-  }
-  else 
-  {
-    Serial.println("- file write failed");
-  }
-#endif
-}
+//  File file = fs.open(path, FILE_WRITE);
+//  if(!file)
+//  {
+//#ifdef VERBOSE
+//    Serial.println("- failed to open file for writing");
+//#endif
+//    return;
+//  }
+//#ifdef VERBOSE
+//  if(file.print(message))
+//  {
+//    Serial.println("- file written");
+//  }
+//  else 
+//  {
+//    Serial.println("- file write failed");
+//  }
+//#endif
+//}
 //
 // Initialize WiFi
 //
@@ -347,12 +353,11 @@ bool initWiFi()
 
   WiFi.mode(WIFI_STA);
 
-  //ScanWiFi();
+#ifdef VERBOSE
+  Serial.printf("Connecting to WiFi %s ", ssid.c_str());
+#endif
 
   WiFi.begin(ssid.c_str(), pass.c_str());
-#ifdef VERBOSE
-  Serial.println("Connecting to WiFi...");
-#endif
 
   unsigned long currentMillis = millis();
   previousMillis = currentMillis;
@@ -363,7 +368,7 @@ bool initWiFi()
     if (currentMillis - previousMillis >= interval) 
     {
 #ifdef VERBOSE
-      Serial.println("Failed to connect.");
+      Serial.print(".");
 #endif
       return false;
     }
@@ -424,7 +429,8 @@ void setup()
   sprintf(wundergroundState, "no attempts to update");
 
   /*****************************************************/
-  //pinMode(LED_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
 #ifdef VERBOSE
   Serial.println("");
   Serial.println("BBS Sept 2022");
@@ -476,13 +482,13 @@ void setup()
   mqttClient.setServer(mqttServer, mqtt_portVal);
   mqttClient.setCallback(MQTT_Callback);
   
-  initSPIFFS();
+  //initSPIFFS();
   
   // Load values saved in SPIFFS
-  ssid = readFile(SPIFFS, ssidPath);
-  pass = readFile(SPIFFS, passPath);
-  ip = readFile(SPIFFS, ipPath);
-  gateway = readFile (SPIFFS, gatewayPath);
+  ssid = "FamilyRoom";     //readFile(SPIFFS, ssidPath);
+  pass = "ZoeyDora48375";  //readFile(SPIFFS, passPath);
+  ip = "192.168..200";     //readFile(SPIFFS, ipPath);
+  gateway = "192.168.1.1"; //readFile (SPIFFS, gatewayPath);
 
   #ifdef VERBOSE
   int freq = getCpuFrequencyMhz();
@@ -494,6 +500,7 @@ void setup()
   Serial.printf("APB Freq = %dHz\n", freq);
   #endif
   
+  //setCpuFrequencyMhz(80);
   setCpuFrequencyMhz(80);
   #ifdef VERBOSE
   Serial.printf("Updated Freq\n");
@@ -511,115 +518,115 @@ void setup()
   // wifi connected
   if(initWiFi()) 
   {
-    // Web Server Root URL
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-    {
-      request->send(SPIFFS, "/index.html", "text/html");
-    });    
-    server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
-       request->send_P(200, "text/plain", String(quarterHourRainInches).c_str());
-    });
-    server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
-       request->send_P(200, "text/plain", String(dayRainInches).c_str());
-    });
-    server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
-       request->send_P(200, "text/plain", String(hourRainInches).c_str());
-    });
-    server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
-       UpdateLocalTime();
-       request->send_P(200, "text/plain", String(localTimeStr).c_str());
-    });
+//   // Web Server Root URL
+//    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+//    {
+//      request->send(SPIFFS, "/index.html", "text/html");
+//    });    
+//    server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
+//       request->send_P(200, "text/plain", String(quarterHourRainInches).c_str());
+//    });
+//    server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
+//       request->send_P(200, "text/plain", String(dayRainInches).c_str());
+//    });
+//    server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
+//       request->send_P(200, "text/plain", String(hourRainInches).c_str());
+//    });
+//    server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
+//       UpdateLocalTime();
+//       request->send_P(200, "text/plain", String(localTimeStr).c_str());
+//    });
   // Start server
     server.begin();
-
-    //rtc.offset = gmtOffset_sec;
+//
+//    //rtc.offset = gmtOffset_sec;
   }
-  // wifi not connected  
-  else 
-  {
-    while(true)
-    {
-    // Connect to Wi-Fi network with SSID and password
-#ifdef VERBOSE
-    Serial.println("Setting AP (Access Point)");
-#endif
-    // NULL sets an open Access Point
-    WiFi.softAP("ESP-WIFI-MANAGER", NULL);
-
-    IPAddress IP = WiFi.softAPIP();
-#ifdef VERBOSE
-    Serial.print("AP IP address: ");
-    Serial.println(IP); 
-#endif
-    // Web Server Root URL
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-    {
-      request->send(SPIFFS, "/wifimanager.html", "text/html");
-    });
-    
-    server.serveStatic("/", SPIFFS, "/");
-    
-    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) 
-    {
-      int params = request->params();
-      for(int i=0;i<params;i++){
-        AsyncWebParameter* p = request->getParam(i);
-        if(p->isPost()){
-          // HTTP POST ssid value
-          if (p->name() == PARAM_INPUT_1) {
-            ssid = p->value().c_str();
-#ifdef VERBOSE
-            Serial.print("SSID set to: ");
-            Serial.println(ssid);
-#endif
-            // Write file to save value
-            writeFile(SPIFFS, ssidPath, ssid.c_str());
-          }
-          // HTTP POST pass value
-          if (p->name() == PARAM_INPUT_2) {
-            pass = p->value().c_str();
-#ifdef VERBOSE
-            Serial.print("Password set to: ");
-            Serial.println(pass);
-#endif
-            // Write file to save value
-            writeFile(SPIFFS, passPath, pass.c_str());
-          }
-          // HTTP POST ip value
-          if (p->name() == PARAM_INPUT_3) {
-            ip = p->value().c_str();
-#ifdef VERBOSE            
-            Serial.print("IP Address set to: ");
-            Serial.println(ip);
-#endif
-            // Write file to save value
-            writeFile(SPIFFS, ipPath, ip.c_str());
-          }
-          // HTTP POST gateway value
-          if (p->name() == PARAM_INPUT_4) {
-            gateway = p->value().c_str();
-#ifdef VERBOSE
-            Serial.print("Gateway set to: ");
-            Serial.println(gateway);
-#endif
-            // Write file to save value
-            writeFile(SPIFFS, gatewayPath, gateway.c_str());
-          }
-        }
-      }
-      request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
-      delay(3000);
-      ESP.restart();
-    });
-      #ifdef VERBOSE
-      Serial.print(".");
-      #endif
-      delay(1000);
-    }
+ //  // wifi not connected  
+//  else 
+//  {
+//    while(true)
+//    {
+//    // Connect to Wi-Fi network with SSID and password
+//#ifdef VERBOSE
+//    Serial.println("Setting AP (Access Point)");
+//#endif
+//    // NULL sets an open Access Point
+//    WiFi.softAP("ESP-WIFI-MANAGER", NULL);
+//
+//    IPAddress IP = WiFi.softAPIP();
+//#ifdef VERBOSE
+//    Serial.print("AP IP address: ");
+//    Serial.println(IP); 
+//#endif
+//    // Web Server Root URL
+//    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+//    {
+//      request->send(SPIFFS, "/wifimanager.html", "text/html");
+//    });
+//    
+//    server.serveStatic("/", SPIFFS, "/");
+//    
+//    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) 
+//    {
+//      int params = request->params();
+//      for(int i=0;i<params;i++){
+//        AsyncWebParameter* p = request->getParam(i);
+//        if(p->isPost()){
+//          // HTTP POST ssid value
+//          if (p->name() == PARAM_INPUT_1) {
+//            ssid = p->value().c_str();
+//#ifdef VERBOSE
+//            Serial.print("SSID set to: ");
+//            Serial.println(ssid);
+//#endif
+//            // Write file to save value
+//            writeFile(SPIFFS, ssidPath, ssid.c_str());
+//          }
+//          // HTTP POST pass value
+//          if (p->name() == PARAM_INPUT_2) {
+//            pass = p->value().c_str();
+//#ifdef VERBOSE
+//            Serial.print("Password set to: ");
+//            Serial.println(pass);
+//#endif
+//            // Write file to save value
+//            writeFile(SPIFFS, passPath, pass.c_str());
+//          }
+//          // HTTP POST ip value
+//          if (p->name() == PARAM_INPUT_3) {
+//            ip = p->value().c_str();
+//#ifdef VERBOSE            
+//            Serial.print("IP Address set to: ");
+//            Serial.println(ip);
+//#endif
+//            // Write file to save value
+//            writeFile(SPIFFS, ipPath, ip.c_str());
+//          }
+//          // HTTP POST gateway value
+//          if (p->name() == PARAM_INPUT_4) {
+//            gateway = p->value().c_str();
+//#ifdef VERBOSE
+//            Serial.print("Gateway set to: ");
+//            Serial.println(gateway);
+//#endif
+//            // Write file to save value
+//            writeFile(SPIFFS, gatewayPath, gateway.c_str());
+//          }
+//        }
+//      }
+//      request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
+//      delay(3000);
+//      ESP.restart();
+//    });
+//      #ifdef VERBOSE
+//      Serial.print(".");
+//      #endif
+//      delay(1000);
+//    }
     //server.begin();
     //delay(2000);  
     //UpdateLocalTime();
-  }
+//  }
 }
 //
 //
@@ -725,6 +732,7 @@ void loop()
       published_payload[2] = String(hourRainInches, 4);
       published_payload[3] = String(dayRainInches, 4);
       published_payload[4] = String(payloadStr);
+      digitalWrite(LED_PIN, HIGH);
       MQTT_PublishTopics();    
       //
       // Weather Underground update
@@ -748,7 +756,7 @@ void loop()
       //  loop and start over again.
       #ifdef VERBOSE      
       Serial.println(">>>>>Update Weather Underground<<<<<");    
-    #endif
+      #endif
       if (!wifiClient.connect(host, 80))
       {
         #ifdef VERBOSE      
@@ -780,22 +788,29 @@ void loop()
           Serial.println(">>> Client Timeout !");
           #endif
           wifiClient.stop();
-          sprintf(wundergroundState, "%s %s", wundergroundState, " Client timeout");          
+          sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
           return;
         }
       }
 
       // Read the response from Weather Underground and print it to the console.
+      char wundergroundResponse[256];
       while(wifiClient.available()) 
       {
         String line = wifiClient.readStringUntil('\r');
-        #ifdef VERBOSE      
-        Serial.print(line);
-        #endif      
-        sprintf(wundergroundState, "%s", "Client responded");          
+        //#ifdef VERBOSE      
+        //Serial.print(line);
+        //#endif      
+        sprintf(wundergroundResponse, "%s", line);          
       }
+      sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
+
+      #ifdef VERBOSE      
+      Serial.println(wundergroundResponse);
+      #endif      
       #endif
       lastForceUpdate = millis();
+      digitalWrite(LED_PIN, LOW);
     }
   else
   {
@@ -826,12 +841,14 @@ void MQTT_Reconnect()
   {
     mqttConnect = false;
 #ifdef VERBOSE
-    Serial.print("mqttClientID: ");
-    Serial.println(mqttClientID);
-    Serial.print("mqtt_user: ");
-    Serial.println(mqtt_user);
-    Serial.print("mqtt_password: ");
-    Serial.println(mqtt_password);
+    Serial.print("MQTT client ");
+    Serial.print(mqttClientID.c_str());
+    Serial.print(" user: ");
+    Serial.print(mqtt_user);
+    Serial.print(" password: ");
+    Serial.print(mqtt_password);
+    Serial.print(" attempts ");
+    Serial.println(attemptCount);
 #endif
     // connected, subscribe and publish
     if (mqttClient.connect(mqttClientID.c_str(), mqtt_user, mqtt_password)) 
@@ -844,10 +861,6 @@ void MQTT_Reconnect()
       // Wait before retrying
       delay(RECONNECT_DELAY);
     }
-#ifdef VERBOSE
-    Serial.print("MQTT connect attempt as ");
-    Serial.println(mqttClientID.c_str());
-    #endif
     attemptCount++;
   }
   delay(RECONNECT_DELAY);
@@ -858,8 +871,7 @@ void MQTT_Reconnect()
   if(mqttConnect)
   {
 #ifdef VERBOSE
-    Serial.print("MQTT connected as ");
-    Serial.println(mqttClientID.c_str());
+    Serial.println("MQTT connected!");
 #endif
     sprintf(mqttState, "%s connected", mqttClientID.c_str());
   }
