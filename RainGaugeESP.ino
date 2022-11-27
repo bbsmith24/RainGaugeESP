@@ -171,7 +171,7 @@ PubSubClient mqttClient(wifiClient);
 String mqttClientID = "MQTTRainGauge_";   // local name, must be unique on MQTT server so append a random string at the end
 // subscribed (listening) topic(s)
 #define MAX_SUBSCRIBE        3
-String subscribed_topic[MAX_SUBSCRIBE] =  { "Rain_Gauge/MQTT_RainGaugeWUReport",      // switch weather underground reporting on/off
+String subscribed_topic[MAX_SUBSCRIBE] =  { "Rain_Gauge/WU_RainGaugeWUReport",      // switch weather underground reporting on/off
                                             "Rain_Gauge/MQTT_RainGaugeMQTTReport",    // switch MQTT reporting on/off
                                             "Rain_Gauge/RainGauge_Reset"              // clear credentials and restart
                                           };
@@ -895,7 +895,7 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
   Serial.println(payloadStr);
 #endif
 
-  if(topicStr == "Rain_Gauge/MQTT_RainGaugeWUReport")
+  if(topicStr == "Rain_Gauge/WU_RainGaugeWUReport")
   {
     if(payloadStr == "\"ON\"")
     {
@@ -956,9 +956,13 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
 //
 void MQTT_SubscribeTopics()
 {  
+  bool subscribed = false;
   for(int idx = 0; idx < MAX_SUBSCRIBE; idx++)
   {
-    mqttClient.subscribe(subscribed_topic[idx].c_str());
+    subscribed = mqttClient.subscribe(subscribed_topic[idx].c_str());
+    #ifdef VERBOSE
+    Serial.printf("subscribing topic %s %s\n", subscribed_topic[idx].c_str(), (subscribed ? "success!" : "failed"));
+    #endif
   }
 }
 //
