@@ -1,28 +1,52 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>ESP Wi-Fi Manager</title>
+  <title>Rain Gauge Credentials</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="data:,">
   <link rel="stylesheet" type="text/css" href="style.css">
 </head>
 <body>
   <div class="topnav">
-    <h1>ESP Wi-Fi Manager</h1>
+    <h1>Rain Gauge Credentials</h1>
   </div>
   <div class="content">
     <div class="card-grid">
       <div class="card">
         <form action="/" method="POST">
           <p>
+			<div>WiFi Credentials</div>
             <label for="ssid">SSID</label>
             <input type="text" id ="ssid" name="ssid"><br>
             <label for="pass">Password</label>
             <input type="text" id ="pass" name="pass"><br>
             <label for="ip">IP Address</label>
-            <input type="text" id ="ip" name="ip" value="192.168.1.200"><br>
+            <input type="text" id ="ip" name="ip"><br>
             <label for="gateway">Gateway Address</label>
-            <input type="text" id ="gateway" name="gateway" value="192.168.1.1"><br>
+            <input type="text" id ="gateway" name="gateway"><br>
+			<hr/>
+			<div>Time zone and DST offsets (hours)</div>
+			<label for="tz">Time Zone offset from GST</label>
+            <input type="text" id ="timezone" name="timezone"><br>
+            <label for="dst">DST offset</label>
+            <input type="text" id ="dst" name="dst"><br>
+			<hr/>
+			<div>MQTT setup</div>
+			<label for="mqtt_serverIP">MQTT server IP</label>
+            <input type="text" id ="mqtt_serverIP" name="mqtt_serverIP"><br>
+            <label for="mqtt_port">MQTT port</label>
+            <input type="text" id ="mqtt_port" name="mqtt_port" value="8080"><br>
+            <label for="mqtt_user">MQTT user name</label>
+            <input type="text" id ="mqtt_user" name="mqtt_user"><br>
+            <label for="mqtt_password">MQTT password</label>
+            <input type="text" id ="mqtt_password" name="mqtt_password"><br>
+			<hr/>
+			<div>Weather Underground setup</div>
+			<label for="wu_ID">Weather Underground ID</label>
+            <input type="text" id ="wu_ID" name="wu_ID"><br>
+            <label for="wu_Key">Weather Underground Key</label>
+            <input type="text" id ="wu_Key" name="wu_Key"><br>
+			<hr/>
             <input type ="submit" value ="Submit">
           </p>
         </form>

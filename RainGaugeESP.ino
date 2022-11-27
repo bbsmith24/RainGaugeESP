@@ -1,64 +1,121 @@
-/*********
+/*
   Brian Smith
-  10/2022
-
+  November 2022
   IOT Rain Gauge
-  Serves a web page, connects to MQTT server, push data to weather underground
-  Serves a web page for ssid/password if not previously stored to SPIFFS
+  uses MQTT to update OpenHAB (or any other MQTT server)
+  push info to Weather Underground  
 
-*********/
+  based on ESP32_Credentials
+  Brian B Smith
+  November 2022
+  brianbsmith.com
+  info@brianbsmith.com
+  
+  Copyright (c) 2022 Brian B Smith. All rights reserved.
 
-#include <Arduino.h>
-#include <WiFi.h>
-#include <ESPAsyncWebServer.h>
-#include <AsyncTCP.h>
-//#include "SPIFFS.h"
-#include <time.h>        // for NTP time
-#include <ESP32Time.h>   // for RTC time
-#include <ESP32Ping.h>
+  This is free software; you can redistribute it and/or
+  modify it under the terms of the GNU Lesser General Public
+  License as published by the Free Software Foundation; either
+  version 2.1 of the License, or (at your option) any later version.
+
+  This library is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+  Lesser General Public License for more details.
+
+  You should have received a copy of the GNU Lesser General Public
+  License along with this library; if not, write to the Free Software
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+  This does nothing interesting on its own, except to get credentials and timezone offset (if needed) then connect to 
+  WiFi and output the time every minute. Use as a basis for other applications that need WiFi
+  
+  'ESP32_Credentials' is based on "ESP32: Create a Wi-Fi Manager" tutorial by Rui Santos at Random Nerds Tutorials
+  found here: https://randomnerdtutorials.com/esp32-wi-fi-manager-asyncwebserver/
+  They have lots of useful tutorials here, well worth a visit!
+
+  changes from original:
+    just get wifi credentials, no web server page after connection
+    refactored for clarity/ease of use (at least it's more clear to me...)
+    added 'clear credentials' to allow for changing between wifi networks (reset, reboots to credentials page, reboots to connection)
+    added 'define VERBOSE' for debug statements
+    use defines for constant values
+    allow undefined local ip, allows router to set ip from DNS
+    get time from NTP server and set internal RTC
+    added local time offset from GMT and daylight savings time offset to credentials page - hours now, could be enhanced with a combo box for timezone
+
+*/
+#define VERBOSE                 // more output for debugging
+//#define POWER_STATE_REPORTING  // use INA260 for reporting solar v/mA and microcontroller load V/mA to monitor charging state
+// wait between wifi and MQTT server connect attempts
+#define RECONNECT_DELAY    5000
+// wait between sensor updates
+#define CHECK_STATE_DELAY 60000
+#define FORMAT_LITTLEFS_IF_FAILED true
+
+// for Sparkfun ESP32 Thing Plus
+//#define RAINGAUGE_PIN 5  
+// for Sparkfun ESP32 Thing
+#define RAINGAUGE_PIN 14 
+
+#include <Arduino.h>            // 
+#include <WiFi.h>               // 
+#include <ESPAsyncWebServer.h>  // https://github.com/me-no-dev/ESPAsyncWebServer
+#include <AsyncTCP.h>           // https://github.com/me-no-dev/AsyncTCP
+#include "FS.h"                 // 
+#include "LITTLEFS.h"           // LittleFS_esp32 by loral from Arduino library manager
+#include <time.h>               // for NTP time
+#include <ESP32Time.h>          // for RTC time https://github.com/fbiego/ESP32Time
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>
-
-void MQTT_Callback(char* topic, byte* payload, unsigned int length);
-
-//#define VERBOSE
-#define WEATHER_UNDERGROUND
+#ifdef POWER_STATE_REPORTING
+#include <Adafruit_INA260.h>  // voltage/current
+#endif
 
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 
+//
+// global variables for ESP32 credentials
+// using #define instead of const saves some program space
+#define WIFI_WAIT 10000    // interval between attempts to connect to wifi
 // Search for parameter in HTTP POST request
-const char* PARAM_INPUT_1 = "ssid";
-const char* PARAM_INPUT_2 = "pass";
-const char* PARAM_INPUT_3 = "ip";
-const char* PARAM_INPUT_4 = "gateway";
-
-// Variables to save values from HTML form
+#define PARAM_INPUT_1  "ssid"
+#define PARAM_INPUT_2  "pass"
+#define PARAM_INPUT_3  "ip"
+#define PARAM_INPUT_4  "gateway"
+#define PARAM_INPUT_5  "timezone"
+#define PARAM_INPUT_6  "dst"
+//Variables to save values from HTML form
 String ssid;
 String pass;
 String ip;
 String gateway;
-
+String tz;
+String dst;
 // File paths to save input values permanently
-const char* ssidPath = "/ssid.txt";
-const char* passPath = "/pass.txt";
-const char* ipPath = "/ip.txt";
-const char* gatewayPath = "/gateway.txt";
+#define ssidPath     "/ssid.txt"
+#define passPath     "/pass.txt"
+#define ipPath       "/ip.txt"
+#define gatewayPath  "/gate.txt"
+#define tzPath       "/tz.txt"
+#define dstPath      "/dst.txt"
 
-// hardcoded
-IPAddress localGateway(192, 168, 1, 1);
-IPAddress localIP(192, 168, 1, 200); 
-IPAddress subnet(255, 255, 255, 0);
-IPAddress dnsServer(8,8,8,8);
-// Timer variables
-unsigned long previousMillis = 0;
-const long interval = 10000;  // interval to wait for Wi-Fi connection (milliseconds)
-
+// ESP32 IP address (use DNS if blank)
+IPAddress localIP;
+// local Gateway IP address and subnet mask
+IPAddress localGateway;
+IPAddress subnet(255, 255, 0, 0);
+//
+// global variables for time
+//
 // NTP Server Details
-const char* ntpServer = "pool.ntp.org";
-const long  gmtOffset_sec = -18000;
-const int   daylightOffset_sec = 3600;
-ESP32Time rtc(0/*-18000*/);
+//const char* ntpServer = "pool.ntp.org";
+#define ntpServer "pool.ntp.org"
+
+long  gmtOffset_sec = 0;//-18000;
+int   daylightOffset_sec = 0;// 3600;
+ESP32Time rtc(0);
 
 int dayNum;
 int monthNum;
@@ -66,6 +123,11 @@ int yearNum;
 int hourNum;
 int minNum;
 int secondNum;
+
+int lastDayNum = -1;
+int lastHourNum = -1;
+int lastMinNum = -1;
+
 char weekDay[10];
 char dayMonth[4];
 char monthName[5];
@@ -77,7 +139,105 @@ char localTimeStr[256];
 char connectDateTime[256];
 bool connectDateTimeSet = false;
 bool rtcTimeSet = false;
+// Timer variables
+unsigned long previousMillis = 0;
+unsigned long timeCheckInterval = 30000;
+unsigned long lastTimeCheck = 0;
 
+char wifiState[256];
+bool wifiConnected = false;
+//
+// MQTT info
+//
+#define PARAM_INPUT_7   "mqtt_serverIP"
+#define PARAM_INPUT_8   "mqtt_port"
+#define PARAM_INPUT_9   "mqtt_user"
+#define PARAM_INPUT_10  "mqtt_password"
+
+#define mqtt_serverPath    "/mqttIP.txt"
+#define mqtt_portPath      "/mqttPrt.txt"
+#define mqtt_userPath      "/mqttUse.txt"
+#define mqtt_passwordPath  "/mqttPas.txt"
+
+void MQTT_Callback(char* topic, byte* payload, unsigned int length);
+String mqtt_server = "0.0.0.0";
+String mqtt_port  = "0";
+String mqtt_user;
+String mqtt_password;
+IPAddress mqttserverIP(0, 0, 0, 0);
+int  mqtt_portVal = 0;
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+String mqttClientID = "MQTTRainGauge_";   // local name, must be unique on MQTT server so append a random string at the end
+// subscribed (listening) topic(s)
+#define MAX_SUBSCRIBE        3
+String subscribed_topic[MAX_SUBSCRIBE] =  { "Rain_Gauge/MQTT_RainGaugeWUReport",      // switch weather underground reporting on/off
+                                            "Rain_Gauge/MQTT_RainGaugeMQTTReport",    // switch MQTT reporting on/off
+                                            "Rain_Gauge/RainGauge_Reset"              // clear credentials and restart
+                                          };
+
+// published (send to server) topic(s)
+#ifdef POWER_STATE_REPORTING
+#define MAX_PUBLISH 17
+#else
+#define MAX_PUBLISH 5
+#endif
+String published_topic[MAX_PUBLISH] = {  "Rain_Gauge/Date",
+                                         "Rain_Gauge/pastQuarterHour",
+                                         "Rain_Gauge/pastHour",
+                                         "Rain_Gauge/past24Hours",
+                                         "Rain_Gauge"
+  #ifdef POWER_STATE_REPORTING  
+                                        ,"RainGauge/ControllerVAve",
+                                         "RainGauge/ControllerVMin", 
+                                         "RainGauge/ControllerVMax", 
+                                         "RainGauge/ControllerAAve", 
+                                         "RainGauge/ControllerAMin", 
+                                         "RainGauge/ControllerAMax", 
+                                         "RainGauge/SolarVAve",
+                                         "RainGauge/SolarVMin",
+                                         "RainGauge/SolarVMax",
+                                         "RainGauge/SolarAAve",
+                                         "RainGauge/SolarAMin",
+                                         "RainGauge/SolarAMax",
+  #endif
+                                      };
+
+String published_payload[MAX_PUBLISH];
+char payloadStr[512];
+char mqttState[256];
+bool mqtt_Report = false;
+//
+// Weather underground credentials
+//
+#define host "weatherstation.wunderground.com"
+#define PARAM_INPUT_11  "wu_ID"
+#define PARAM_INPUT_12  "wu_Key"
+#define wu_IDPath  "/wuID.txt"
+#define wu_KeyPath  "/wuKey.txt"
+
+String wUndergroundID;
+String wUndergroundKey;  
+char wundergroundState[256];
+bool wUnderground_Report = false;
+
+#ifdef POWER_STATE_REPORTING
+#define INA260_COUNT 2
+#define INA260_INTERVAL 10000
+Adafruit_INA260 sensors[INA260_COUNT];
+int i2cAddresses[INA260_COUNT] = {0x40, 0x41};
+String sensorDesc[INA260_COUNT] = {"Micro", "Solar" };
+float measuredV_ave[INA260_COUNT];
+float measuredV_min[INA260_COUNT];
+float measuredV_max[INA260_COUNT];
+float measuredA_ave[INA260_COUNT];
+float measuredA_min[INA260_COUNT];
+float measuredA_max[INA260_COUNT];
+int ina260MeasureCount = 0;
+unsigned long ina260LastMeasure = 0;
+#endif
+
+// rain information
 #define MIN_PER_DAY 1440
 #define LAST_X_DAYS 28
 #define LAST_X_HOURS 24
@@ -87,21 +247,6 @@ bool rtcTimeSet = false;
 //#define INTERVAL_MS          300000 //    5 minute interval
 //#define MAX_UPDATE_INTERVAL_MS 600000 //   10 minute max between updates
 #define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
-// for devkit c
-#define RAINGAUGE_PIN 14 
-// for Sparkfun ESP32 Thing Plus
-//#define LED_PIN 13
-//#define RAINGAUGE_PIN 5  
-// for Sparkfun ESP32 Thing
-//#define RAINGAUGE_PIN 5  
-#define LED_PIN 5
-#define MAX_SUBSCRIBE        10
-#define MAX_PUBLISH          10
-// wait between wifi and MQTT server connect attempts
-#define RECONNECT_DELAY    5000
-// wait between sensor updates
-#define CHECK_STATE_DELAY 60000
-
 // rain for current minute, stored for 
 int rainByMinuteIdx = 0;                // current index of by minute rolling buffer
 unsigned int rainByMinute[MIN_PER_DAY]; // circular buffer for every minute value for last 24 hours
@@ -125,371 +270,28 @@ float dayRainInches = 0.0;
 float priorQuarterHourRainInches = 0.0;
 float priorHourRainInches = 0.0;
 float priorDayRainInches = 0.0;
+
 bool neverUpdated = true;
 unsigned long lastForceUpdate = 0;
 unsigned long lastUpdate = 0;
-//int ledState = 1;
-unsigned long currentTime = 0;
-volatile bool clicked = false;
-// mqtt setup
-IPAddress mqttServer(192, 168, 1, 76);
-//char mqtt_server[40];
-char mqtt_port[6]  = "8080";
-char mqtt_user[40];
-char mqtt_password[40];
-char mqtt_api_token[32] = "YOUR_API_TOKEN";
-byte mqtt_ip[4] = {192, 168, 1, 76};
-int  mqtt_portVal = 1883;
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
-String mqttClientID = "MQTTRainGauge_";   // local name, must be unique on MQTT server so append a random string at the end
-// subscribed (listening) topic(s)
-int subscribed_count = 1;
-int published_count = 5;
-String subscribed_topic[MAX_SUBSCRIBE];
-String published_topic[MAX_PUBLISH];
-String published_payload[MAX_PUBLISH];
-char payloadStr[512];
-// Weather underground credentials
-String WUndergroundID = "KMINOVI53";
-String WUndergroundKey = "fQnoqk2e";  
-const char* host = "weatherstation.wunderground.com";
-
-char wifiState[256];
-char mqttState[256];
-char wundergroundState[256];
-
+volatile bool clicked = false;  // true after rain gauge triggers hall sensor
 //
-// trigger on hall sensor low as magnet passes by
+// connect to wifi. if credentials not present/invalid, boot to access point and present page to get them
 //
-ICACHE_RAM_ATTR void RainGaugeTrigger()
-{
-  if(digitalRead(RAINGAUGE_PIN) == LOW)
-  {
-    clicked = true;
-  }
-}
-//
-// scan for wifi access points
-//
-void ScanWiFi()
-{
-#ifdef VERBOSE
-  Serial.println("WiFi scan start");
-
-  // WiFi.scanNetworks will return the number of networks found
-  int n = WiFi.scanNetworks();
-  Serial.println("scan done");
-  if (n == 0) 
-  {
-      Serial.println("no networks found");
-  }
-  else 
-  {
-    Serial.print(n);
-    Serial.println(" networks found");
-    for (int i = 0; i < n; ++i) {
-      // Print SSID and RSSI for each network found
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" (");
-      Serial.print(WiFi.RSSI(i));
-      Serial.print(")");
-      Serial.println((WiFi.encryptionType(i) == WIFI_AUTH_OPEN)?" ":"*");
-      delay(10);
-    }
-  }
-#endif  
-}
-//
-// get local time (initially set via NTP server)
-//
-void UpdateLocalTime()
+void setup()
 {
   #ifdef VERBOSE
-  Serial.print("Update local time ");
-  #endif
-  // if not set from NTP, get time and set RTC
-  if(!rtcTimeSet)
-  {
-    digitalWrite(LED_PIN, HIGH);
-    #ifdef VERBOSE
-    Serial.print("from NTP server ");    
-    #endif
-    struct tm timeinfo;
-    if(!getLocalTime(&timeinfo)){
-      // Init timeserver
-      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-      getLocalTime(&timeinfo);
-    }
-    //GET DATE
-    strftime(weekDay, sizeof(weekDay), "%a", &timeinfo);
-    strftime(dayMonth, sizeof(dayMonth), "%d", &timeinfo);
-    strftime(monthName, sizeof(monthName), "%b", &timeinfo);
-    strftime(year, sizeof(year), "%Y", &timeinfo);
-
-    //GET TIME
-    strftime(hour, sizeof(hour), "%H", &timeinfo);
-    strftime(minute, sizeof(minute), "%M", &timeinfo);
-    strftime(second, sizeof(second), "%S", &timeinfo);
-
-    dayNum = atoi(dayMonth);
-    monthNum = timeinfo.tm_mon+1;
-    yearNum = atoi(year);
-    hourNum = atoi(hour);
-    minNum = atoi(minute);
-    secondNum = atoi(second);
-
-    //rtc.setTime(secondNum, minNum, hourNum, dayNum, monthNum, yearNum);
-    rtc.setTimeStruct(timeinfo);
-    rtcTimeSet = true;
-    digitalWrite(LED_PIN, LOW);
-  }
-  // use RTC for time
-  else
-  {
-    #ifdef VERBOSE
-    Serial.print("from embedded RTC ");  
-    #endif 
-    dayNum = rtc.getDay();
-    monthNum = rtc.getMonth() + 1;
-    yearNum = rtc.getYear();
-    hourNum = rtc.getHour();
-    minNum = rtc.getMinute();
-    secondNum = rtc.getSecond();
-  }
-  sprintf(localTimeStr, "%d/%d/%d %02d:%02d:%02d", monthNum, dayNum, yearNum, hourNum, minNum, secondNum);
-  #ifdef VERBOSE
-  Serial.println(localTimeStr);
-  Serial.flush();
-  #endif
-  if(!connectDateTimeSet)
-  {
-    strcpy(connectDateTime, localTimeStr);
-    connectDateTimeSet = true;
-  }
-}
-////
-//// Initialize SPIFFS
-////
-//void initSPIFFS() 
-//{
-//  if (!SPIFFS.begin(true)) 
-//  {
-//#ifdef VERBOSE
-//    Serial.println("An error has occurred while mounting SPIFFS");
-//#endif
-//  }
-//#ifdef VERBOSE  
-//  Serial.println("SPIFFS mounted successfully");
-//#endif  
-//}
-////
-//// Read File from SPIFFS
-////
-//String readFile(fs::FS &fs, const char * path)
-//{
-//#ifdef VERBOSE
-//  Serial.printf("Reading file: %s\r\n", path);
-//#endif
-//
-//  File file = fs.open(path);
-//  if(!file || file.isDirectory())
-//  {
-//#ifdef VERBOSE
-//    Serial.println("- failed to open file for reading");
-//#endif
-//    return String();
-//  }
-//  
-//  String fileContent;
-//  while(file.available()){
-//    fileContent = file.readStringUntil('\n');
-//    break;     
-//  }
-//  return fileContent;
-//}
-////
-//// Write file to SPIFFS
-////
-//void writeFile(fs::FS &fs, const char * path, const char * message)
-//{
-//#ifdef VERBOSE
-//  Serial.printf("Writing file: %s\r\n", path);
-//#endif
-//
-//  File file = fs.open(path, FILE_WRITE);
-//  if(!file)
-//  {
-//#ifdef VERBOSE
-//    Serial.println("- failed to open file for writing");
-//#endif
-//    return;
-//  }
-//#ifdef VERBOSE
-//  if(file.print(message))
-//  {
-//    Serial.println("- file written");
-//  }
-//  else 
-//  {
-//    Serial.println("- file write failed");
-//  }
-//#endif
-//}
-//
-// Initialize WiFi
-//
-bool initWiFi() 
-{
-  if(ssid=="" || ip=="")
-  {
-#ifdef VERBOSE
-    Serial.println("Undefined SSID or IP address.");
-#endif
-    return false;
-  }
-
-  WiFi.mode(WIFI_STA);
-
-#ifdef VERBOSE
-  Serial.printf("Connecting to WiFi %s ", ssid.c_str());
-#endif
-
-  WiFi.begin(ssid.c_str(), pass.c_str());
-
-  unsigned long currentMillis = millis();
-  previousMillis = currentMillis;
-
-  while(WiFi.status() != WL_CONNECTED) 
-  {
-    currentMillis = millis();
-    if (currentMillis - previousMillis >= interval) 
-    {
-#ifdef VERBOSE
-      Serial.print(".");
-#endif
-      return false;
-    }
-  }
-
-#ifdef VERBOSE
-  Serial.println("Connected!");
-  Serial.print("Gateway: ");
-  Serial.println(WiFi.gatewayIP());
-  Serial.print("Local: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("Subnet: ");
-  Serial.println(WiFi.subnetMask());
-#endif
-  sprintf(wifiState, "IP %s", WiFi.localIP().toString().c_str()); 
-  // Init and get the time
-  UpdateLocalTime();
-  return true;
-}
-// 
-// Replaces placeholder with sensor values
-//
-String processor(const String& var)
-{
-  if(var == "QUARTERHOUR")
-  {
-    return String(currentRainInches);
-  }
-  else if(var == "LASTHOUR")
-  {
-    return String(hourRainInches);
-  }
-  else if(var == "DAY")
-  {
-    return String(dayRainInches);
-  }
-  else if(var == "DATETIME")
-  {
-    return String(localTimeStr);
-  }
-  else
-  {
-    return "ERROR";
-  }
-  return String();
-}
-//
-//
-//
-void setup() 
-{
-  // Serial port for debugging purposes
   Serial.begin(115200);
-  delay(1000);
-  
-  sprintf(wifiState, "not connected");
-  sprintf(mqttState, "not connected");
-  sprintf(wundergroundState, "no attempts to update");
+  #endif
 
-  /*****************************************************/
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-#ifdef VERBOSE
+  #ifdef VERBOSE
   Serial.println("");
-  Serial.println("BBS Sept 2022");
-  Serial.println("Rain gauge website host");
+  Serial.println("BBS Nov 2022");
+  Serial.println("IOT Rain gauge");
   Serial.println("=======================");
-#endif
-  for(int idx = 0; idx < MIN_PER_DAY; idx++)
-  {
-    rainByMinute[idx] = 0;
-  }
-  for(int idx = 0; idx < LAST_X_HOURS; idx++)
-  {
-    rainByHour[idx] = 0;
-  }
-  for(int idx = 0; idx < LAST_X_DAYS; idx++)
-  {
-    rainByDay[idx] = 0;
-  }
-  // set up the rising edge interrupt for the rain sensor
-  pinMode(RAINGAUGE_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
-  /*****************************************************/
-
-  // MQTT client name
-  // YOU CANNOT DUPLICATE CLIENT NAMES!!!! (and expect them both to work anyway...)
-  randomSeed(analogRead(0));
-  mqttClientID += String(random(0xffff), HEX);
-  sprintf(mqtt_user,"openhabian");
-  sprintf(mqtt_password,"SJnu12HMo");
-
-  // subscribed and published MQTT topics
-  published_topic[0] =   "Rain_Gauge/Date";
-  published_topic[1] =   "Rain_Gauge/pastQuarterHour";
-  published_topic[2] =   "Rain_Gauge/pastHour";
-  published_topic[3] =   "Rain_Gauge/past24Hours";
-  published_topic[4] =   "Rain_Gauge";
-
-  subscribed_topic[0] = "MQTT_Sensors/TestMQTTValue";
-  
-  published_count = 5;
-  subscribed_count = 1;
-  
-#ifdef VERBOSE
-  Serial.print("MQTT Server: ");
-  Serial.println(mqttServer);
-  Serial.print("MQTT Port: ");
-  Serial.println(mqtt_portVal);
-#endif
-  mqttClient.setServer(mqttServer, mqtt_portVal);
-  mqttClient.setCallback(MQTT_Callback);
-  
-  //initSPIFFS();
-  
-  // Load values saved in SPIFFS
-  ssid = "FamilyRoom";     //readFile(SPIFFS, ssidPath);
-  pass = "ZoeyDora48375";  //readFile(SPIFFS, passPath);
-  ip = "192.168..200";     //readFile(SPIFFS, ipPath);
-  gateway = "192.168.1.1"; //readFile (SPIFFS, gatewayPath);
-
+  delay(1000);
+  #endif
+  // set CPU freq to 80MHz, disable bluetooth  to save power
   #ifdef VERBOSE
   int freq = getCpuFrequencyMhz();
   Serial.printf("Default Freq\n");
@@ -499,8 +301,6 @@ void setup()
   freq = getApbFrequency();
   Serial.printf("APB Freq = %dHz\n", freq);
   #endif
-  
-  //setCpuFrequencyMhz(80);
   setCpuFrequencyMhz(80);
   #ifdef VERBOSE
   Serial.printf("Updated Freq\n");
@@ -515,128 +315,272 @@ void setup()
   #ifdef VERBOSE
   Serial.printf("Bluetooth disabled\n");
   #endif  
-  // wifi connected
-  if(initWiFi()) 
+
+  // initialize LITTLEFS for reading credentials
+  LITTLEFS_Init();
+
+  #ifdef VERBOSE
+  // list files in LITTLEFS
+  LITTLEFS_ListDir(LITTLEFS, "/", 10);
+  #endif
+  // uncomment to clear saved credentials 
+  //ClearCredentials();
+
+  // Load values saved in LITTLEFS if any
+  LoadCredentials();
+  //
+  // try to initalize wifi with stored credentials
+  // if getting credentials from config page, reboot after to connect with new credentials
+  //
+  if(!WiFi_Init()) 
   {
-//   // Web Server Root URL
-//    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-//    {
-//      request->send(SPIFFS, "/index.html", "text/html");
-//    });    
-//    server.on("/quarterHour", HTTP_GET, [](AsyncWebServerRequest *request){
-//       request->send_P(200, "text/plain", String(quarterHourRainInches).c_str());
-//    });
-//    server.on("/day", HTTP_GET, [](AsyncWebServerRequest *request){
-//       request->send_P(200, "text/plain", String(dayRainInches).c_str());
-//    });
-//    server.on("/lastHour", HTTP_GET, [](AsyncWebServerRequest *request){
-//       request->send_P(200, "text/plain", String(hourRainInches).c_str());
-//    });
-//    server.on("/dateTime", HTTP_GET, [](AsyncWebServerRequest *request){
-//       UpdateLocalTime();
-//       request->send_P(200, "text/plain", String(localTimeStr).c_str());
-//    });
-  // Start server
-    server.begin();
-//
-//    //rtc.offset = gmtOffset_sec;
+    #ifdef VERBOSE
+    Serial.println("No credentials stored - get from locally hosted page");
+    #endif
+    GetCredentials();
   }
- //  // wifi not connected  
-//  else 
-//  {
-//    while(true)
-//    {
-//    // Connect to Wi-Fi network with SSID and password
-//#ifdef VERBOSE
-//    Serial.println("Setting AP (Access Point)");
-//#endif
-//    // NULL sets an open Access Point
-//    WiFi.softAP("ESP-WIFI-MANAGER", NULL);
-//
-//    IPAddress IP = WiFi.softAPIP();
-//#ifdef VERBOSE
-//    Serial.print("AP IP address: ");
-//    Serial.println(IP); 
-//#endif
-//    // Web Server Root URL
-//    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-//    {
-//      request->send(SPIFFS, "/wifimanager.html", "text/html");
-//    });
-//    
-//    server.serveStatic("/", SPIFFS, "/");
-//    
-//    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) 
-//    {
-//      int params = request->params();
-//      for(int i=0;i<params;i++){
-//        AsyncWebParameter* p = request->getParam(i);
-//        if(p->isPost()){
-//          // HTTP POST ssid value
-//          if (p->name() == PARAM_INPUT_1) {
-//            ssid = p->value().c_str();
-//#ifdef VERBOSE
-//            Serial.print("SSID set to: ");
-//            Serial.println(ssid);
-//#endif
-//            // Write file to save value
-//            writeFile(SPIFFS, ssidPath, ssid.c_str());
-//          }
-//          // HTTP POST pass value
-//          if (p->name() == PARAM_INPUT_2) {
-//            pass = p->value().c_str();
-//#ifdef VERBOSE
-//            Serial.print("Password set to: ");
-//            Serial.println(pass);
-//#endif
-//            // Write file to save value
-//            writeFile(SPIFFS, passPath, pass.c_str());
-//          }
-//          // HTTP POST ip value
-//          if (p->name() == PARAM_INPUT_3) {
-//            ip = p->value().c_str();
-//#ifdef VERBOSE            
-//            Serial.print("IP Address set to: ");
-//            Serial.println(ip);
-//#endif
-//            // Write file to save value
-//            writeFile(SPIFFS, ipPath, ip.c_str());
-//          }
-//          // HTTP POST gateway value
-//          if (p->name() == PARAM_INPUT_4) {
-//            gateway = p->value().c_str();
-//#ifdef VERBOSE
-//            Serial.print("Gateway set to: ");
-//            Serial.println(gateway);
-//#endif
-//            // Write file to save value
-//            writeFile(SPIFFS, gatewayPath, gateway.c_str());
-//          }
-//        }
-//      }
-//      request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
-//      delay(3000);
-//      ESP.restart();
-//    });
-//      #ifdef VERBOSE
-//      Serial.print(".");
-//      #endif
-//      delay(1000);
-//    }
-    //server.begin();
-    //delay(2000);  
-    //UpdateLocalTime();
-//  }
+  sprintf(wifiState, "Not connected");
+  sprintf(mqttState, "No attempts");
+  sprintf(wundergroundState, "No attempts");
+  
+  // zero rain counters
+  ZeroRainCounts();
+  
+  // set up the rising edge interrupt for the rain sensor
+  pinMode(RAINGAUGE_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
+
+  #ifdef POWER_STATE_REPORTING
+  // if enabled, set up charge state reporting
+  ina260LastMeasure = millis();
+  // set up voltage/current sensors on I2C bus
+  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+  {
+    sensors[senseIdx] = Adafruit_INA260();
+    if (!sensors[senseIdx].begin(i2cAddresses[senseIdx])) 
+    {
+      Serial.print("Couldn't find INA260 at 0x");
+      Serial.println(i2cAddresses[senseIdx], HEX);
+      while (1);
+    }
+    Serial.print("INA260 connected 0x");
+    Serial.print(i2cAddresses[senseIdx], HEX);
+    Serial.print(" ");
+    Serial.println(sensorDesc[senseIdx]);
+    measuredV_ave[senseIdx] = 0.0F;
+    measuredV_min[senseIdx] = 1000.0F;
+    measuredV_max[senseIdx] = 0.0F;
+    measuredA_ave[senseIdx] = 0.0F;
+    measuredA_min[senseIdx]= 1000.0F;;
+    measuredA_max[senseIdx] = 0.0F;
+    ina260MeasureCount = 0;    
+  }
+  #endif
+  // generate a randomized MQTT client name
+  // YOU CANNOT DUPLICATE CLIENT NAMES!!!! (and expect them both to work anyway...)
+  randomSeed(analogRead(0));
+  mqttClientID += String(random(0xffff), HEX);
+
+  #ifdef VERBOSE
+  Serial.print("MQTT Server: ");
+  Serial.println(mqtt_server);
+  Serial.print("Port: ");
+  Serial.println(mqtt_portVal);
+  Serial.print("User: ");
+  Serial.println(mqtt_user);
+  Serial.print("Password: ");
+  Serial.println(mqtt_password);
+  #endif
+  mqttClient.setServer(mqttserverIP, mqtt_portVal);
+  mqttClient.setCallback(MQTT_Callback);
+
+  // get time
+  UpdateLocalTime();
 }
 //
+// main loop
+// check for rain, update MQTT and Weather Underground on change or every 15 minutes is no changes
 //
-//
-void loop()
+void loop() 
 {
-   mqttClient.loop();
-   yield();
+  // only continue if connected to wifi
+  if(!wifiConnected)
+  {
+    return;
+  }
+  // let mqtt and client stuff happen to keep watchdog on leash
+  mqttClient.loop();
 
-  // rain gauge click
+  // Read solar panel and battery power state (if enabled by #define POWER_STATE_REPORTING)
+  ReadPowerState();
+
+  // on 30 second intervals
+  unsigned long now = millis();
+  if(now - lastTimeCheck > timeCheckInterval)
+  {
+    // get time
+    UpdateLocalTime();
+    timeCheckInterval = 30000;
+    if((secondNum % 30) != 0)
+    {
+      timeCheckInterval += ((30 - (secondNum % 30)) * 1000);
+    }
+    #ifdef VERBOSE
+    Serial.printf("Time check interval %d\n", timeCheckInterval);
+    #endif
+    lastTimeCheck = now;
+  }
+  // Update minute, hour, day indices in cicular buffers 
+  UpdateBufferIndices();
+  
+  // if there was a click, update values and reset clicked to false
+  RainGaugeClicked();
+
+  // never updated listeners, or time to update?
+  if((neverUpdated == true) ||
+     ((now - lastUpdate) >= INTERVAL_MS))
+  {
+    // update rain values to be reported to MQTT and WU
+    UpdateRainValues();
+
+    // only update on max update time exceeded or rain amount changed
+    if((neverUpdated) ||
+       (quarterHourRainInches != priorQuarterHourRainInches) ||
+       (hourRainInches != priorHourRainInches) ||
+       (dayRainInches != priorDayRainInches) ||
+       ((now - lastUpdate) >= MAX_UPDATE_INTERVAL_MS))
+    {
+      
+      // average power values since last report
+      AveragePowerValues();
+      
+      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s | Weather Underground: %s",connectDateTime, 
+                                                                                        wifiState, 
+                                                                                        mqttState,
+                                                                                        wundergroundState);
+      // send report to Weather Underground if enabled
+      WU_Report();     
+
+      // send report to MQTT Host if enables    
+      MQTT_Report();
+
+      // update last reported values, newver updated, and last update time
+      priorQuarterHourRainInches = quarterHourRainInches;
+      priorHourRainInches = hourRainInches;
+      priorDayRainInches = dayRainInches;
+      neverUpdated = false;
+      lastUpdate = now;
+      #ifdef VERBOSE
+      Serial.printf("time %d next update check at %d\n", millis(), (lastUpdate + INTERVAL_MS));    
+      #endif
+    }
+  }
+}
+//
+// zero rain counter variables
+//
+void ZeroRainCounts()
+{
+  for(int idx = 0; idx < MIN_PER_DAY; idx++)
+  {
+    rainByMinute[idx] = 0;
+  }
+  for(int idx = 0; idx < LAST_X_HOURS; idx++)
+  {
+    rainByHour[idx] = 0;
+  }
+  for(int idx = 0; idx < LAST_X_DAYS; idx++)
+  {
+    rainByDay[idx] = 0;
+  }
+  #ifdef VERBOSE
+  Serial.println("Rain counts zeroed");
+  delay(1000);
+  #endif
+}
+//
+// read solar panel and battery charge start, if enabled
+//
+void ReadPowerState()
+{  
+  #ifdef POWER_STATE_REPORTING
+  float ina260Val = 0.0F;
+  if(millis() - ina260LastMeasure > INA260_INTERVAL)
+  {
+    for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+    {
+      ina260Val = sensors[senseIdx].readBusVoltage()/1000.0F;
+      ina260Val = ina260Val >= 0.0F ? ina260Val : 0.0F;
+      #ifdef VERBOSE
+      Serial.print(sensorDesc[senseIdx]);
+      Serial.print(" ");
+      Serial.print(ina260Val);
+      Serial.print("V ");
+      #endif
+      measuredV_ave[senseIdx] += ina260Val;
+      measuredV_min[senseIdx] = ina260Val < measuredV_min[senseIdx] ? ina260Val : measuredV_min[senseIdx];
+      measuredV_max[senseIdx] = ina260Val > measuredV_max[senseIdx] ? ina260Val : measuredV_max[senseIdx];
+      ina260Val = sensors[senseIdx].readCurrent();
+      ina260Val = ina260Val >= 0.0F ? ina260Val : 0.0F;
+      #ifdef VERBOSE
+      Serial.print(ina260Val);
+      Serial.print("mA ");
+      #endif
+      measuredA_ave[senseIdx] += ina260Val;
+      measuredA_min[senseIdx] = ina260Val < measuredA_min[senseIdx] ? ina260Val : measuredA_min[senseIdx];
+      measuredA_max[senseIdx] = ina260Val > measuredA_max[senseIdx] ? ina260Val : measuredA_max[senseIdx];
+    }
+    ina260MeasureCount++;
+    Serial.print(" measurements ");
+    Serial.println(ina260MeasureCount);
+    ina260LastMeasure = millis();
+  }
+  #endif   
+}
+//
+// update minute, day, hour indices in respective circular buffers
+//
+void UpdateBufferIndices()
+{
+  // check and update minute/hour/day circular buffer indices
+  // on change update last, increment index, zero circular buffer entry
+  bool indexChanged = false;
+  if(lastMinNum != minNum)
+  {
+    lastMinNum = minNum;
+    rainByMinuteIdx = rainByMinuteIdx + 1 < MIN_PER_DAY ? rainByMinuteIdx + 1 : 0;
+    rainByMinute[rainByMinuteIdx] = 0;
+    indexChanged = true;
+  }
+  if(lastHourNum != hourNum)
+  {
+    lastHourNum = hourNum;
+    // get next rain by hour index, reset rain clicks
+    rainByHourIdx = rainByHourIdx + 1 < LAST_X_HOURS ? rainByHourIdx + 1 : 0;
+    rainByHour[rainByHourIdx] = 0;
+    indexChanged = true;
+  }
+  if(lastDayNum != dayNum)
+  {
+    lastDayNum = dayNum;
+    // get next rain by day index, reset rain clicks
+    // replace with check for hour change, update rainByHourIdx
+    rainByDayIdx = rainByDayIdx + 1 < LAST_X_DAYS ? rainByDayIdx + 1 : 0;
+    rainByDay[rainByDayIdx] = 0;
+    indexChanged = true;
+  }
+  #ifdef VERBOSE
+  if(indexChanged)
+  {
+    Serial.printf("%s\tIndices: Minute %d\tHour %d\tDay %d\n", localTimeStr, rainByMinuteIdx, rainByHourIdx, rainByDayIdx);
+  }
+  #endif
+}
+//
+// rain gauge clicked
+//
+void RainGaugeClicked()
+{
   if(clicked)
   {
     clicked = false;
@@ -648,246 +592,261 @@ void loop()
     rainByDay[rainByDayIdx]++;
     totalTicks++;
   }
-
-  // time to update?
-  if((neverUpdated == true) ||
-     ((millis() - lastUpdate) >= INTERVAL_MS))
+}
+//
+// update rain values to be reported to MQTT and WU
+//
+void UpdateRainValues()
+{
+  // update count for last minute
+  rainForLastMinute = rainByMinute[rainByMinuteIdx];
+  // update total counts for last 24 hours, 1 hour, 15 minutes (most recent 15 and 60 readings in circular buffer)
+  rainForLastQuarter = 0;
+  rainForLastHour = 0;
+  rainForLastDay = 0;
+  int minIdx = rainByMinuteIdx;
+  for(int minCount = 0; minCount < MIN_PER_DAY; minCount++)
+  {
+    if(minCount < 15)
+    {
+      rainForLastQuarter += rainByMinute[minIdx];
+    }
+    if(minCount < 60)
+    {
+      rainForLastHour += rainByMinute[minIdx];
+    }
+    rainForLastDay += rainByMinute[minIdx];
+    minIdx = (minIdx - 1) >= 0 ? (minIdx - 1) : MIN_PER_DAY - 1;
+  }
+  // update values for web page, output to serial for debug
+  currentRainInches = (float)rainForLastMinute * INCHES_PER_CLICK;
+  quarterHourRainInches = (float)rainForLastQuarter * INCHES_PER_CLICK;
+  hourRainInches = (float)rainForLastHour * INCHES_PER_CLICK;
+  dayRainInches = (float)rainForLastDay * INCHES_PER_CLICK;
+}
+//
+// report to Weather Underground if enabled
+//
+void WU_Report()
+{
+  if(wUnderground_Report == true)
   {
     #ifdef VERBOSE
-    Serial.println("\n\nUpdate values");    
+    Serial.println(">>>>>Update Weather Underground<<<<<");
     #endif
-    // get time
-    UpdateLocalTime();
-    // update count for last minute
-    rainForLastMinute = rainByMinute[rainByMinuteIdx];
-    // update total counts for last 24 hours, 1 hour, 15 minutes (most recent 15 and 60 readings in circular buffer)
-    rainForLastQuarter = 0;
-    rainForLastHour = 0;
-    rainForLastDay = 0;
-    int minIdx = rainByMinuteIdx;
-    for(int minCount = 0; minCount < MIN_PER_DAY; minCount++)
-    {
-      if(minCount < 15)
-      {
-        rainForLastQuarter += rainByMinute[minIdx];
-      }
-      if(minCount < 60)
-      {
-        rainForLastHour += rainByMinute[minIdx];
-      }
-      rainForLastDay += rainByMinute[minIdx];
-      minIdx = (minIdx - 1) >= 0 ? (minIdx - 1) : MIN_PER_DAY - 1;
-    }
-    // update values for web page, output to serial for debug
-    currentRainInches = (float)rainForLastMinute * INCHES_PER_CLICK;
-    quarterHourRainInches = (float)rainForLastQuarter * INCHES_PER_CLICK;
-    hourRainInches = (float)rainForLastHour * INCHES_PER_CLICK;
-    dayRainInches = (float)rainForLastDay * INCHES_PER_CLICK;
-    currentTime = millis();
-    
-
-    // get next rain by minute index in circular buffer, reset rain clicks to zero for upcoming minute 
-    rainByMinuteIdx = rainByMinuteIdx + 1 < MIN_PER_DAY ? rainByMinuteIdx + 1 : 0;
-    rainByMinute[rainByMinuteIdx] = 0;
-
-    // get next rain by hour index, reset rain clicks
-    // replace with check for hour change, update rainByHourIdx
-    if((rainByMinuteIdx % 60) == 0)
-    {
-      rainByHourIdx = rainByHourIdx + 1 < LAST_X_HOURS ? rainByHourIdx + 1 : 0;
-      rainByHour[rainByHourIdx] = 0;
-    }
-    // get next rain by day index, reset rain clicks
-    // replace with check for hour change, update rainByHourIdx
-    if(rainByMinuteIdx == 0)
-    {
-      rainByDayIdx = rainByDayIdx + 1 < LAST_X_DAYS ? rainByDayIdx + 1 : 0;
-      rainByDay[rainByDayIdx] = 0;
-    }
     //
-    // only update on max update time exceeded or any rain amount changed
+    // Weather Underground update
     //
-    if((neverUpdated) ||
-       (quarterHourRainInches != priorQuarterHourRainInches) ||
-       (hourRainInches != priorHourRainInches) ||
-       (dayRainInches != priorDayRainInches) ||
-       ((millis() - lastForceUpdate) >= MAX_UPDATE_INTERVAL_MS))
+    // Set up the generic use-every-time part of the URL
+    String url = "/weatherstation/updateweatherstation.php";
+    url += "?ID=";
+    url += wUndergroundID;
+    url += "&PASSWORD=";
+    url += wUndergroundKey;
+    url += "&dateutc=now&action=updateraw";
+    // Now let's add in the data that we've collected from our sensors
+    // Start with rain in last hour/day
+    url += "&rainin=";
+    url += hourRainInches;
+    url += "&dailyrainin=";
+    url += dayRainInches;
+    // Connnect to Weather Underground. If the connection fails, return from
+    //  loop and start over again.
+    #ifdef VERBOSE      
+    Serial.println(">>>>>Update Weather Underground<<<<<");    
+    #endif
+    if (!wifiClient.connect(host, 80))
     {
-      sprintf(payloadStr,"Connected %s | WiFi: %s | Weather Underground: %s",connectDateTime, 
-                                                                             wifiState, 
-                                                                             wundergroundState);
-      #ifdef VERBOSE
-      Serial.println(payloadStr);
-      Serial.println(">>>>>Update OpenHAB<<<<<");    
-      #endif
-      // update last reported values
-      priorQuarterHourRainInches = quarterHourRainInches;
-      priorHourRainInches = hourRainInches;
-      priorDayRainInches = dayRainInches;
-      //
-      // MQTT update
-      //    
-      published_payload[0] = String(localTimeStr);
-      published_payload[1] = String(quarterHourRainInches, 4);
-      published_payload[2] = String(hourRainInches, 4);
-      published_payload[3] = String(dayRainInches, 4);
-      published_payload[4] = String(payloadStr);
-      digitalWrite(LED_PIN, HIGH);
-      MQTT_PublishTopics();    
-      //
-      // Weather Underground update
-      //
-      // Set up the generic use-every-time part of the URL
-      String url = "/weatherstation/updateweatherstation.php";
-      url += "?ID=";
-      url += WUndergroundID;
-      url += "&PASSWORD=";
-      url += WUndergroundKey;
-      url += "&dateutc=now&action=updateraw";
-
-      // Now let's add in the data that we've collected from our sensors
-      // Start with rain in last hour/day
-      url += "&rainin=";
-      url += hourRainInches;
-      url += "&dailyrainin=";
-      url += dayRainInches;
-      #ifdef WEATHER_UNDERGROUND
-      // Connnect to Weather Underground. If the connection fails, return from
-      //  loop and start over again.
       #ifdef VERBOSE      
-      Serial.println(">>>>>Update Weather Underground<<<<<");    
+      Serial.println("Weather Underground connection failed");
       #endif
-      if (!wifiClient.connect(host, 80))
+      sprintf(wundergroundState, "Not connected");
+      return;
+    }
+    else
+    {
+      #ifdef VERBOSE      
+      Serial.println("Weather Underground connected");
+      #endif
+      sprintf(wundergroundState, "Connected");
+    }
+    // Issue the GET command to Weather Underground to post the data we've 
+    //  collected.
+    wifiClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" +
+               "Connection: close\r\n\r\n");
+
+    // Give Weather Underground five seconds to reply.
+    unsigned long timeout = millis();
+    while (wifiClient.available() == 0) 
+    {
+      if (millis() - timeout > 5000) 
       {
         #ifdef VERBOSE      
-        Serial.println("Weather Underground connection failed");
+        Serial.println(">>> Client Timeout !");
         #endif
-        sprintf(wundergroundState, "Not Connected");
+        wifiClient.stop();
+        sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
         return;
       }
-      else
-      {
-        #ifdef VERBOSE      
-        Serial.println("Weather Underground connected");
-        #endif
-        sprintf(wundergroundState, "Connected");
-      }
-      // Issue the GET command to Weather Underground to post the data we've 
-      //  collected.
-      wifiClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
-                   "Host: " + host + "\r\n" +
-                   "Connection: close\r\n\r\n");
-
-      // Give Weather Underground five seconds to reply.
-      unsigned long timeout = millis();
-      while (wifiClient.available() == 0) 
-      {
-        if (millis() - timeout > 5000) 
-        {
-          #ifdef VERBOSE      
-          Serial.println(">>> Client Timeout !");
-          #endif
-          wifiClient.stop();
-          sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
-          return;
-        }
-      }
-
-      // Read the response from Weather Underground and print it to the console.
-      char wundergroundResponse[256];
-      while(wifiClient.available()) 
-      {
-        String line = wifiClient.readStringUntil('\r');
-        //#ifdef VERBOSE      
-        //Serial.print(line);
-        //#endif      
-        sprintf(wundergroundResponse, "%s", line);          
-      }
-      sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
-
-      #ifdef VERBOSE      
-      Serial.println(wundergroundResponse);
-      #endif      
-      #endif
-      lastForceUpdate = millis();
-      digitalWrite(LED_PIN, LOW);
     }
+    // Read the response from Weather Underground and print it to the console.
+    char wundergroundResponse[256];
+    while(wifiClient.available()) 
+    {
+      String line = wifiClient.readStringUntil('\r');
+      sprintf(wundergroundResponse, "%s", line);          
+    }
+    sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
+    #ifdef VERBOSE      
+    Serial.println(wundergroundResponse);
+    #endif      
+  }
   else
   {
-      #ifdef VERBOSE
-      Serial.printf("no change, no update required ");    
-      #endif
-  }
-    neverUpdated = false;
-    // set last update time
-    lastUpdate = millis();
     #ifdef VERBOSE
-    Serial.printf("time %d next update check at %d next forced update %d\n", millis(), (lastUpdate + INTERVAL_MS), (lastForceUpdate + MAX_UPDATE_INTERVAL_MS));    
+    Serial.println(">>>>>Weather Underground reporting OFF<<<<<");
     #endif
   }
 }
+//
+//
+// report to MQTT Host
+void MQTT_Report()
+{    
+  if(mqtt_Report)
+  {
+    #ifdef VERBOSE
+    Serial.println(">>>>>MQTT update ON<<<<<");    
+    Serial.println(payloadStr);
+    #endif
+    //
+    // MQTT update
+    //    
+    published_payload[0] = String(localTimeStr);
+    published_payload[1] = String(quarterHourRainInches, 4);
+    published_payload[2] = String(hourRainInches, 4);
+    published_payload[3] = String(dayRainInches, 4);
+    published_payload[4] = String(payloadStr);
+    #ifdef POWER_STATE_REPORTING
+    published_payload[ 5] = String(measuredV_ave[0]);
+    published_payload[ 6] = String(measuredV_min[0]); 
+    published_payload[ 7] = String(measuredV_max[0]);
+    published_payload[ 8] = String(measuredA_ave[0]);
+    published_payload[ 9] = String(measuredA_min[0]);
+    published_payload[10] = String(measuredA_max[0]);
+    published_payload[11] = String(measuredV_ave[1]);
+    published_payload[12] = String(measuredV_min[1]); 
+    published_payload[13] = String(measuredV_max[1]);
+    published_payload[14] = String(measuredA_ave[1]);
+    published_payload[15] = String(measuredA_min[1]);
+    published_payload[16] = String(measuredA_max[1]);
+    #endif      
+    MQTT_PublishTopics();    
+  }
+  else
+  {
+    Serial.println(">>>>>MQTT update OFF<<<<<");    
+  }
+  #ifdef POWER_STATE_REPORTING
+  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+  {
+    measuredV_ave[senseIdx] = 0.0F;
+    measuredV_min[senseIdx] = 1000.0F;
+    measuredV_max[senseIdx] = 0.0F;
+    measuredA_ave[senseIdx] = 0.0F;
+    measuredA_min[senseIdx]= 1000.0F;;
+    measuredA_max[senseIdx] = 0.0F;
+    ina260MeasureCount = 0;    
+  }
+  #endif    
+}
+//
+// average solar and battery power values if enabled
+//
+void AveragePowerValues()
+{      
+  #ifdef POWER_STATE_REPORTING
+  // average volt/amp reading since last report
+  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+  {
+    measuredV_ave[senseIdx] /= (float)ina260MeasureCount;
+    measuredA_ave[senseIdx] /= (float)ina260MeasureCount;
+  }
+  #ifdef VERBOSE
+  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+  {
+    Serial.printf("\t%s\tV ave %0.1f min %0.1f max %0.1f\t mA ave %0.1f min %0.1f max %0.1f\n", sensorDesc[senseIdx].c_str(),
+                                                                                                 measuredV_ave[senseIdx], 
+                                                                                                 measuredV_min[senseIdx], 
+                                                                                                 measuredV_max[senseIdx], 
+                                                                                                 measuredA_ave[senseIdx], 
+                                                                                                 measuredA_min[senseIdx], 
+                                                                                                 measuredA_max[senseIdx]);
+  }
+  #endif    
+  #endif    
+}      
+//
+// trigger on hall sensor low as magnet passes by
+//
+ICACHE_RAM_ATTR void RainGaugeTrigger()
+{
+  if(digitalRead(RAINGAUGE_PIN) == LOW)
+  {
+    clicked = true;
+  }
+}
+//
+// ================================ begin MQTT functions ========================================
+//
 //****************************************************************************
 //
 // (re)connect to MQTT server
 //
 //****************************************************************************
-void MQTT_Reconnect() 
+bool MQTT_Reconnect() 
 {
   // Loop until we're reconnected
-  int blinkVal = HIGH;
   int attemptCount = 0;
   bool mqttConnect = true;
-  while (!mqttClient.connected() && (attemptCount < 10)) 
+  while (!mqttClient.connected() && (attemptCount < 5)) 
   {
+    sprintf(mqttState, "Not connected");
     mqttConnect = false;
-#ifdef VERBOSE
-    Serial.print("MQTT client ");
+    #ifdef VERBOSE
+    Serial.printf("MQTT connect attempt %d ", (attemptCount + 1));
     Serial.print(mqttClientID.c_str());
-    Serial.print(" user: ");
+    Serial.print(" mqttClientID: ");
+    Serial.print(mqttClientID);
+    Serial.print(" mqtt_user: ");
     Serial.print(mqtt_user);
-    Serial.print(" password: ");
-    Serial.print(mqtt_password);
-    Serial.print(" attempts ");
-    Serial.println(attemptCount);
-#endif
+    Serial.print(" mqtt_password: ");
+    Serial.println(mqtt_password);
+    #endif
     // connected, subscribe and publish
-    if (mqttClient.connect(mqttClientID.c_str(), mqtt_user, mqtt_password)) 
+    if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
     {
-      // set up listeners for server updates  
-      MQTT_SubscribeTopics();
+      mqttConnect = true;
+      sprintf(mqttState, "Connected");
+      break;
     }
-    else 
-    {
-      // Wait before retrying
-      delay(RECONNECT_DELAY);
-    }
+    // Wait before retrying
+    delay(RECONNECT_DELAY);
     attemptCount++;
   }
+  if(!mqttConnect)
+  {
+    Serial.println("MQTT not connected!");
+    return mqttConnect;
+  }
   delay(RECONNECT_DELAY);
-  if(mqttClient.connected())
-  {
-    mqttConnect = true;
-  }
-  if(mqttConnect)
-  {
-#ifdef VERBOSE
-    Serial.println("MQTT connected!");
-#endif
-    sprintf(mqttState, "%s connected", mqttClientID.c_str());
-  }
-  else
-  {
-#ifdef VERBOSE
-    Serial.print("MQTT not connected - ");
-    Serial.print(attemptCount);
-    Serial.print(" attempts");
-    Serial.println(mqttClientID.c_str());
-#endif
-    sprintf(mqttState, "not connected after %d attempts", attemptCount);
-  }
+  Serial.println("MQTT connected!");
+  // we're connected
+  // set up listeners for server updates  
+  MQTT_SubscribeTopics();
+  return mqttConnect;
 
-  // we're connected, indicator on 
-  delay(2000);
 }
 //****************************************************************************
 //
@@ -910,13 +869,69 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
   Serial.print(" payload  ");
   Serial.println(payloadStr);
 #endif
+
+  if(topicStr == "Rain_Gauge/MQTT_RainGaugeWUReport")
+  {
+    if(payloadStr == "\"ON\"")
+    {
+      wUnderground_Report = true;
+    }
+    else
+    {
+      wUnderground_Report = false;
+    }
+    // in either case, zero the rain stats
+    totalTicks = 0;
+    for(int minIdx = 0; minIdx < MIN_PER_DAY; minIdx++)
+    {
+      rainByMinute[minIdx] = 0;
+    }
+    for(int hourIdx = 0; hourIdx < LAST_X_HOURS; hourIdx++)
+    {
+      rainByHour[hourIdx] = 0;
+    }
+    for(int dayIdx = 0; dayIdx < LAST_X_DAYS; dayIdx++)
+    {
+      rainByDay[dayIdx]++;
+    }
+    
+    // update values for web page, output to serial for debug
+    currentRainInches = 0.0F;
+    quarterHourRainInches = 0.0F;
+    hourRainInches = 0.0F;
+    dayRainInches =  0.0F;
+    #ifdef VERBOSE
+    Serial.printf("Weather Underground reporting %s - rain counts zeroed\n", wUnderground_Report ? "ON" : "OFF");
+    #endif
+  }
+  if(topicStr == "Rain_Gauge/MQTT_RainGaugeMQTTReport")
+  {
+    if(payloadStr == "\"ON\"")
+    {
+      mqtt_Report = true;
+    }
+    else
+    {
+      mqtt_Report = false;
+    }
+    #ifdef VERBOSE
+    Serial.printf("MQTT reporting %s\n", mqtt_Report ? "ON" : "OFF");
+    #endif
+  }
+  if(topicStr == "Rain_Gauge/Rain_Gauge/RainGauge_Reset")
+  {
+    #ifdef VERBOSE
+    Serial.println("Reset - clear credentials, restart");
+    #endif
+    ClearCredentials();
+  }
 }
 //
 // subscribed MQTT topics (get updates from MQTT server)
 //
 void MQTT_SubscribeTopics()
 {  
-  for(int idx = 0; idx < subscribed_count; idx++)
+  for(int idx = 0; idx < MAX_SUBSCRIBE; idx++)
   {
     mqttClient.subscribe(subscribed_topic[idx].c_str());
   }
@@ -926,29 +941,613 @@ void MQTT_SubscribeTopics()
 // if multiple topics could be published, it might be good to either pass in the specific name
 // or make separate publish functions
 //
-void MQTT_PublishTopics()
+bool MQTT_PublishTopics()
 {
-  if (!mqttClient.connected())
+  bool connected = mqttClient.connected();
+  if (!connected)
   {
-#ifdef VERBOSE
-    UpdateLocalTime();
-    Serial.print("MQTT not connected at ");
-    Serial.println(localTimeStr);
-#endif
-    MQTT_Reconnect();
+    connected = MQTT_Reconnect();
   }
   //
+  if(!connected)
+  {
+    Serial.println("MQTT not connected in MQTT_PublishTopics()");
+    return connected;
+  }
   int pubSubResult = 0;
-  for(int idx = 0; idx < published_count; idx++)
+  for(int idx = 0; idx < MAX_PUBLISH; idx++)
   {
     pubSubResult = mqttClient.publish(published_topic[idx].c_str(), published_payload[idx].c_str());
 #ifdef VERBOSE
-    Serial.print("Publishing ");
+    Serial.print((pubSubResult == 0 ? "FAIL TO PUBLISH Topic: " : "PUBLISHED Topic: "));
     Serial.print(published_topic[idx]);
     Serial.print(" ");
-    Serial.print(published_payload[idx]);
-    Serial.print(" ");
-    Serial.println((pubSubResult == 0 ? "FAIL" : "SUCCESS"));
+    Serial.println(published_payload[idx]);
 #endif
   }
+  return connected;
 }
+//
+// ================================ end MQTT functions ========================================
+//
+// ================================ begin LITTLEFS functions ================================
+//
+// Initialize LITTLEFS
+//
+void LITTLEFS_Init() 
+{
+  if (!LITTLEFS.begin(true)) 
+  {
+    #ifdef VERBOSE
+    Serial.println("An error has occurred while mounting LITTLEFS");
+    #endif
+    return;
+  }
+  #ifdef VERBOSE
+  Serial.println("LITTLEFS mounted successfully");
+  #endif
+}
+//
+// Read File from LITTLEFS
+//
+String LITTLEFS_ReadFile(fs::FS &fs, const char * path)
+{
+  #ifdef VERBOSE
+  Serial.printf("Reading file: %s - ", path);
+  #endif
+  File file = fs.open(path);
+  if(!file || file.isDirectory())
+  {
+    #ifdef VERBOSE
+    Serial.println("- failed to open file for reading");
+    #endif
+    return String();
+  }
+  
+  String fileContent;
+  while(file.available())
+  {
+    fileContent = file.readStringUntil('\n');
+    //#ifdef VERBOSE
+    //Serial.println(fileContent);
+    //#endif
+  }
+    #ifdef VERBOSE
+    Serial.println("- read file");
+    #endif
+  return fileContent;
+}
+//
+// Write file to LITTLEFS
+//
+void LITTLEFS_WriteFile(fs::FS &fs, const char * path, const char * message)
+{
+  #ifdef VERBOSE
+  Serial.printf("Writing >>%s<< to file: %s ", message, path);
+  #endif
+  File file = fs.open(path, FILE_WRITE);
+  if(!file)
+  {
+    #ifdef VERBOSE
+    Serial.println("- failed to open file for writing");
+    #endif
+    return;
+  }
+  if(file.print(message))
+  {
+    #ifdef VERBOSE
+    Serial.println("- file written");
+    #endif
+  }
+   else 
+   {
+    #ifdef VERBOSE
+    Serial.println("- file write failed");
+    #endif
+  }
+}
+//
+// list LITTLEFS files
+//
+void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
+{
+    Serial.printf("Listing directory: %s\r\n", dirname);
+
+    File root = fs.open(dirname);
+    if(!root)
+    {
+        Serial.println("- failed to open directory");
+        return;
+    }
+    if(!root.isDirectory())
+    {
+        Serial.println(" - not a directory");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while(file)
+    {
+        if(file.isDirectory())
+        {
+            Serial.print("  DIR : ");
+            Serial.println(file.name());
+            if(levels)
+            {
+                LITTLEFS_ListDir(fs, file.name(), levels -1);
+            }
+        }
+         else 
+         {
+            Serial.print("  FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+}
+//
+// delete named file from LITTLEFS
+//
+void LITTLEFS_DeleteFile(fs::FS &fs, const char * path)
+{
+  #ifdef VERBOSE
+  Serial.printf("Deleting file: %s ", path);
+  #endif
+  if(fs.remove(path))
+  {
+    #ifdef VERBOSE
+    Serial.println("- file deleted");
+    #endif
+  }
+  else 
+  {
+    #ifdef VERBOSE
+    Serial.println("- delete failed");
+    #endif
+  }
+}
+// ================================ end LITTLEFS functions ================================
+// ================================ begin WiFi initialize/credentials functions ================================
+//
+// Initialize WiFi
+//
+bool WiFi_Init() 
+{
+  // cant connect if there's no WiFi SSID defined
+  if(ssid=="")
+  {
+    #ifdef VERBOSE
+    Serial.println("Undefined SSID");
+    #endif    
+    wifiConnected = false;
+    return false;
+  }
+
+  WiFi.mode(WIFI_STA);
+
+  // for (optional) user defined gateway and local IP  
+  localIP.fromString(ip.c_str());
+  localGateway.fromString(gateway.c_str());
+  if((ip != "") || (gateway != ""))
+  {
+    #ifdef VERBOSE
+    Serial.printf("Configure wifi localIP %s gateway %s\n", ip, gateway);
+    #endif
+    if (!WiFi.config(localIP, localGateway, subnet))
+    {
+      #ifdef VERBOSE
+      Serial.println("STA Failed to configure");
+      #endif
+      wifiConnected = false;
+      return false;
+    }
+  }
+  else
+  {
+    #ifdef VERBOSE  
+    Serial.println("Connect to wifi with DNS assigned IP");
+    #endif
+  }
+  // set up and connect to wifi
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  #ifdef VERBOSE
+  Serial.printf("Connecting to WiFi SSID: %s PWD: %s...", ssid.c_str(), pass.c_str());
+  #endif
+  unsigned long currentMillis = millis();
+  previousMillis = currentMillis;
+
+  int retryCount = 0;
+  previousMillis = millis();
+  wifiConnected = true;
+  while((WiFi.status() != WL_CONNECTED) && (retryCount < 10))
+  {
+    currentMillis = millis();
+    if (currentMillis - previousMillis >= WIFI_WAIT) 
+    {
+      #ifdef VERBOSE
+      Serial.printf("Failed to connect on try %d of 10.", retryCount+1);
+      #endif
+      wifiConnected = false;
+      retryCount++;
+      previousMillis = currentMillis;
+    }
+  }
+  if(!wifiConnected)
+  {
+      Serial.printf("Failed to connect after 10 attempts - reset credentials");
+      ClearCredentials();
+  }
+  sprintf(wifiState, "Connected %s ",WiFi.localIP().toString().c_str());
+
+  #ifdef VERBOSE
+  //Serial.print("Connected to wifi ");
+  //Serial.println(WiFi.localIP());
+  Serial.println(wifiState);
+  #endif
+  wifiConnected = true;
+  return true;
+}
+//
+// load wifi credentials from LITTLEFS
+//
+void LoadCredentials()
+{
+  ssid = LITTLEFS_ReadFile(LITTLEFS, ssidPath);
+  pass = LITTLEFS_ReadFile(LITTLEFS, passPath);
+  ip = LITTLEFS_ReadFile(LITTLEFS, ipPath);
+  gateway = LITTLEFS_ReadFile (LITTLEFS, gatewayPath);
+  tz = LITTLEFS_ReadFile (LITTLEFS, tzPath);
+  dst = LITTLEFS_ReadFile (LITTLEFS, dstPath);
+  
+  gmtOffset_sec = atoi(tz.c_str()) * 3600; // convert hours to seconds
+  daylightOffset_sec = atoi(dst.c_str()) * 3600; // convert hours to seconds
+
+  mqtt_server = LITTLEFS_ReadFile(LITTLEFS, mqtt_serverPath);
+  mqttserverIP.fromString(mqtt_server);
+  mqtt_port = LITTLEFS_ReadFile(LITTLEFS, mqtt_portPath);
+  mqtt_portVal = atoi(mqtt_port.c_str());
+  mqtt_user = LITTLEFS_ReadFile(LITTLEFS, mqtt_userPath);
+  mqtt_password = LITTLEFS_ReadFile(LITTLEFS, mqtt_passwordPath);
+
+
+  wUndergroundID = LITTLEFS_ReadFile(LITTLEFS, wu_IDPath);
+  wUndergroundKey = LITTLEFS_ReadFile(LITTLEFS, wu_KeyPath);
+  
+  LITTLEFS_ReadFile(LITTLEFS, "/wifimanager.html");
+  #ifdef VERBOSE
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  Serial.print("PASSWORD: ");
+  Serial.println(pass);
+  Serial.print("Fixed IP (optional): ");
+  Serial.println(ip);
+  Serial.print("Fixed gateway (optional): ");
+  Serial.println(gateway);
+  Serial.print("Timezone offset: ");
+  Serial.print(tz);
+  Serial.print(" ");
+  Serial.println(gmtOffset_sec);
+  Serial.print("DST offset: ");
+  Serial.print(dst);
+  Serial.print(" ");
+  Serial.println(daylightOffset_sec);
+
+  Serial.println("MQTT credentials");
+  Serial.print("Server: ");
+  Serial.println(mqtt_server);
+  Serial.print("Port: ");
+  Serial.println(mqtt_port);
+  Serial.print("User: ");
+  Serial.println(mqtt_user);
+  Serial.print("Password: ");
+  Serial.println(mqtt_password);
+
+  Serial.println("Weather Underground credentials");
+  Serial.print("ID : ");
+  Serial.println(wUndergroundID);
+  Serial.print("Key: ");
+  Serial.println(wUndergroundKey);
+
+  #endif
+}
+//
+// get new credentials from user from web page in access point mode
+//
+void GetCredentials()
+{
+  disableCore0WDT();
+  disableCore1WDT();
+  // Connect to Wi-Fi network with SSID and password
+  #ifdef VERBOSE
+  Serial.print("Setting AP (Access Point) ");
+  #endif
+  // NULL sets an open Access Point
+  WiFi.softAP("ESP-WIFI-MANAGER", NULL);
+
+  IPAddress IP = WiFi.softAPIP();
+  #ifdef VERBOSE
+  Serial.print(" address: ");
+  Serial.println(IP); 
+  #endif
+  // Web Server Root URL
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+  {
+    #ifdef VERBOSE
+    Serial.println("Request from webserver, send page");
+    #endif  
+    request->send(LITTLEFS, "/wifimanager.html", "text/html");
+  });
+    
+  server.serveStatic("/", LITTLEFS, "/");
+  //
+  // display web page and get credentials from user
+  //  
+  server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) 
+  {
+    int params = request->params();
+    for(int i=0;i<params;i++)
+    {
+      yield();
+      AsyncWebParameter* p = request->getParam(i);
+      if(p->isPost())
+      {
+        // HTTP POST ssid value
+        if (p->name() == PARAM_INPUT_1) 
+        {
+          ssid = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_1, ssid);
+          #endif
+        }
+        // HTTP POST password value
+        if (p->name() == PARAM_INPUT_2) 
+        {
+          pass = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_2, pass);
+          #endif
+        }
+        // HTTP POST local ip value
+        if (p->name() == PARAM_INPUT_3) 
+        {
+          ip = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_3, ip);
+          #endif
+        }
+        // HTTP POST gateway ip value
+        if (p->name() == PARAM_INPUT_4) 
+        {
+          gateway = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_4, gateway);
+          #endif
+        }
+        // HTTP POST time zone offset value
+        if (p->name() == PARAM_INPUT_5) 
+        {
+          tz = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_5, tz);
+          #endif
+        }
+        // HTTP POST dst offset value
+        if (p->name() == PARAM_INPUT_6) 
+        {
+          dst = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_6, dst);
+          #endif
+        }
+        // HTTP POST mqtt server ip value
+        if (p->name() == PARAM_INPUT_7) 
+        {
+          mqtt_server = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_7, mqtt_server);
+          #endif
+        }
+        // HTTP POST mqtt port value
+        if (p->name() == PARAM_INPUT_8) 
+        {
+          mqtt_port = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_8, mqtt_port);
+          #endif
+        }
+        // HTTP POST mqtt username value
+        if (p->name() == PARAM_INPUT_9) 
+        {
+          mqtt_user = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_9, mqtt_user);
+          #endif
+        }
+        // HTTP POST mqtt password value
+        if (p->name() == PARAM_INPUT_10) 
+        {
+          mqtt_password = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_10, mqtt_password);
+          #endif
+        }
+        // Weather Underground credentials
+        // HTTP POST Weather Underground ID
+        if (p->name() == PARAM_INPUT_11) 
+        {
+          wUndergroundID = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_11, wUndergroundID);
+          #endif
+        }
+        // HTTP POST Weather Underground Key
+        if (p->name() == PARAM_INPUT_12) 
+        {
+          wUndergroundKey = p->value().c_str();
+          #ifdef VERBOSE
+          Serial.printf("%s %s\n", PARAM_INPUT_12, wUndergroundKey);
+          #endif
+        }
+      }
+    } 
+    request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
+    #ifdef VERBOSE
+    Serial.println("Store credentials in LITTLEFS and reboot");
+    #endif
+    SaveCredentials();
+  });
+  server.begin();
+}
+void SaveCredentials()
+{
+  LITTLEFS_WriteFile(LITTLEFS, ssidPath, ssid.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, passPath, pass.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, ipPath, ip.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, gatewayPath, gateway.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, tzPath, tz.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, dstPath, dst.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, mqtt_serverPath, mqtt_server.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, mqtt_portPath, mqtt_port.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, mqtt_userPath, mqtt_user.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, mqtt_passwordPath, mqtt_password.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, wu_IDPath, wUndergroundID.c_str());
+  LITTLEFS_WriteFile(LITTLEFS, wu_KeyPath, wUndergroundKey.c_str());
+  #ifdef VERBOSE
+  Serial.print("SSID set to: ");
+  Serial.println(ssid);
+  Serial.print("Password set to: ");
+  Serial.println(pass);
+  Serial.print("IP Address set to: ");
+  Serial.println(ip);
+  Serial.print("Time zone offset set to: ");
+  Serial.println(tz);
+  Serial.print("DST offset set to: ");
+  Serial.println(dst);
+  Serial.print("Gateway set to: ");
+  Serial.println(gateway);
+  Serial.print("MQTT server IP: ");
+  Serial.println(mqtt_server);
+  Serial.print("MQTT port: ");
+  Serial.println(mqtt_port);
+  Serial.print("MQTT username: ");
+  Serial.println(mqtt_user);
+  Serial.print("MQTT password: ");
+  Serial.println(mqtt_password);
+  Serial.print("Weather Underground ID: ");
+  Serial.println(wUndergroundID);
+  Serial.print("Weather Underground Key: ");
+  Serial.println(wUndergroundKey);
+  #endif
+  ESP.restart();
+}
+//
+// clear credentials and restart
+// allows user to change wifi SSIDs easily
+//
+void ClearCredentials()
+{
+  #ifdef VERBOSE
+  Serial.println("Clear WiFi credentials");
+  #endif
+  LITTLEFS_DeleteFile(LITTLEFS, ssidPath);
+  LITTLEFS_DeleteFile(LITTLEFS, passPath);
+  LITTLEFS_DeleteFile(LITTLEFS, ipPath);
+  LITTLEFS_DeleteFile(LITTLEFS, gatewayPath);
+  LITTLEFS_DeleteFile(LITTLEFS, tzPath);
+  LITTLEFS_DeleteFile(LITTLEFS, dstPath);
+  // MQTT
+  LITTLEFS_DeleteFile(LITTLEFS, mqtt_serverPath);
+  LITTLEFS_DeleteFile(LITTLEFS, mqtt_portPath);
+  LITTLEFS_DeleteFile(LITTLEFS, mqtt_userPath);
+  LITTLEFS_DeleteFile(LITTLEFS, mqtt_passwordPath);
+  // Weather Underground
+  LITTLEFS_DeleteFile(LITTLEFS, wu_IDPath);
+  LITTLEFS_DeleteFile(LITTLEFS, wu_KeyPath);
+  
+  #ifdef VERBOSE
+  Serial.println("Restart...");
+  #endif
+  delay(WIFI_WAIT);
+  ESP.restart();
+}
+// ================================ end WiFi initialize/credentials functions ================================
+// ================================ begin NTP/RTC time functions ================================
+//
+// get local time (initially set via NTP server)
+//
+void UpdateLocalTime()
+{
+  if(!wifiConnected)
+  {
+    return;
+  }
+  // if not set from NTP, get time and set RTC
+  if(!rtcTimeSet)
+  {
+    #ifdef VERBOSE
+    Serial.print("Time from NTP server ");
+    #endif
+    struct tm timeinfo;
+    if(!getLocalTime(&timeinfo))
+    {
+      // Init timeserver
+      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+      getLocalTime(&timeinfo);
+    }
+    //GET DATE
+    strftime(dayMonth, sizeof(dayMonth), "%d", &timeinfo);
+    strftime(monthName, sizeof(monthName), "%b", &timeinfo);
+    strftime(year, sizeof(year), "%Y", &timeinfo);
+    dayNum = atoi(dayMonth);
+    monthNum = timeinfo.tm_mon+1;
+    yearNum = atoi(year);
+
+    //GET TIME
+    strftime(hour, sizeof(hour), "%H", &timeinfo);
+    strftime(minute, sizeof(minute), "%M", &timeinfo);
+    strftime(second, sizeof(second), "%S", &timeinfo);
+    hourNum = atoi(hour);
+    minNum = atoi(minute);
+    secondNum = atoi(second);
+
+    //rtc.setTime(secondNum, minNum, hourNum, dayNum, monthNum, yearNum);
+    rtc.setTimeStruct(timeinfo);
+    rtcTimeSet = true;
+
+    lastMinNum = minNum;
+    lastHourNum = hourNum;
+    lastDayNum = dayNum;
+  }
+  // use RTC for time
+  else
+  {
+    #ifdef VERBOSE
+    Serial.print("Time from local RTC ");
+    #endif
+    dayNum = rtc.getDay();
+    monthNum = rtc.getMonth() + 1;
+    yearNum = rtc.getYear();
+    hourNum = rtc.getHour();
+    minNum = rtc.getMinute();
+    secondNum = rtc.getSecond();
+  }
+  // set last time values to current
+  if(lastMinNum == -1)
+  {
+    lastMinNum = minNum;
+    lastHourNum = hourNum;
+    lastDayNum = dayNum;
+  }
+  sprintf(localTimeStr, "%02d/%02d/%04d %02d:%02d:%02d", monthNum, dayNum, yearNum, hourNum, minNum, secondNum);
+  if(!connectDateTimeSet)
+  {
+    strcpy(connectDateTime, localTimeStr);
+    connectDateTimeSet = true;
+  }
+  #ifdef VERBOSE
+  Serial.println(localTimeStr);
+  #endif
+}
+// ================================ end NTP/RTC time functions ================================
