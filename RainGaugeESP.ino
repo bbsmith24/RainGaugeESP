@@ -46,7 +46,7 @@
 
 */
 #define VERBOSE                 // more output for debugging
-//#define POWER_STATE_REPORTING  // use INA260 for reporting solar v/mA and microcontroller load V/mA to monitor charging state
+#define POWER_STATE_REPORTING  // use INA260 for reporting solar v/mA and microcontroller load V/mA to monitor charging state
 // wait between wifi and MQTT server connect attempts
 #define RECONNECT_DELAY    5000
 // wait between sensor updates
@@ -206,7 +206,7 @@ String published_topic[MAX_PUBLISH] = {  "Rain_Gauge/Date",
 String published_payload[MAX_PUBLISH];
 char payloadStr[512];
 char mqttState[256];
-bool mqtt_Report = false;
+bool mqtt_Report = true;
 //
 // Weather underground credentials
 //
@@ -316,6 +316,10 @@ void setup()
   Serial.printf("Bluetooth disabled\n");
   #endif  
 
+  sprintf(wifiState, "Not connected");
+  sprintf(mqttState, "No attempts");
+  sprintf(wundergroundState, "No attempts");
+
   // initialize LITTLEFS for reading credentials
   LITTLEFS_Init();
 
@@ -339,9 +343,6 @@ void setup()
     #endif
     GetCredentials();
   }
-  sprintf(wifiState, "Not connected");
-  sprintf(mqttState, "No attempts");
-  sprintf(wundergroundState, "No attempts");
   
   // zero rain counters
   ZeroRainCounts();
@@ -383,7 +384,10 @@ void setup()
 
   #ifdef VERBOSE
   Serial.print("MQTT Server: ");
-  Serial.println(mqtt_server);
+  Serial.print(mqtt_server);
+  Serial.print(" ");
+  Serial.println(mqttserverIP.toString());
+
   Serial.print("Port: ");
   Serial.println(mqtt_portVal);
   Serial.print("User: ");
@@ -458,6 +462,10 @@ void loop()
                                                                                         wifiState, 
                                                                                         mqttState,
                                                                                         wundergroundState);
+      #ifdef VERBOSE
+      Serial.println("Ready to send updates");    
+      Serial.println(payloadStr);    
+      #endif
       // send report to Weather Underground if enabled
       WU_Report();     
 
@@ -481,6 +489,9 @@ void loop()
 //
 void ZeroRainCounts()
 {
+  #ifdef VERBOSE
+  Serial.println("ZeroRainCounts()");
+  #endif
   for(int idx = 0; idx < MIN_PER_DAY; idx++)
   {
     rainByMinute[idx] = 0;
@@ -495,8 +506,8 @@ void ZeroRainCounts()
   }
   #ifdef VERBOSE
   Serial.println("Rain counts zeroed");
-  delay(1000);
   #endif
+  delay(1000);
 }
 //
 // read solar panel and battery charge start, if enabled
@@ -810,19 +821,23 @@ bool MQTT_Reconnect()
   // Loop until we're reconnected
   int attemptCount = 0;
   bool mqttConnect = true;
-  while (!mqttClient.connected() && (attemptCount < 5)) 
+  while (!mqttClient.connected() && (attemptCount < 100)) 
   {
     sprintf(mqttState, "Not connected");
     mqttConnect = false;
     #ifdef VERBOSE
     Serial.printf("MQTT connect attempt %d ", (attemptCount + 1));
-    Serial.print(mqttClientID.c_str());
-    Serial.print(" mqttClientID: ");
+    Serial.print(" Server IP: >");
+    Serial.print(mqttserverIP.toString());
+    Serial.print("< Port: >");
+    Serial.print(mqtt_portVal);
+    Serial.print("< mqttClientID: >");
     Serial.print(mqttClientID);
-    Serial.print(" mqtt_user: ");
+    Serial.print("< mqtt_user: >");
     Serial.print(mqtt_user);
-    Serial.print(" mqtt_password: ");
-    Serial.println(mqtt_password);
+    Serial.print("< mqtt_password: >");
+    Serial.print(mqtt_password);
+    Serial.println("<");
     #endif
     // connected, subscribe and publish
     if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
@@ -837,7 +852,17 @@ bool MQTT_Reconnect()
   }
   if(!mqttConnect)
   {
-    Serial.println("MQTT not connected!");
+    Serial.print("MQTT not connected!");
+    Serial.print(" Server IP: ");
+    Serial.print(mqttserverIP.toString());
+    Serial.print(" Port: ");
+    Serial.print(mqtt_portVal);
+    Serial.print(" mqttClientID: ");
+    Serial.print(mqttClientID.c_str());
+    Serial.print(" mqtt_user: ");
+    Serial.print(mqtt_user.c_str());
+    Serial.print(" mqtt_password: ");
+    Serial.println(mqtt_password.c_str());
     return mqttConnect;
   }
   delay(RECONNECT_DELAY);
@@ -1174,6 +1199,7 @@ bool WiFi_Init()
       previousMillis = currentMillis;
     }
   }
+  wifiConnected = (WiFi.status() == WL_CONNECTED);
   if(!wifiConnected)
   {
       Serial.printf("Failed to connect after 10 attempts - reset credentials");
@@ -1182,12 +1208,9 @@ bool WiFi_Init()
   sprintf(wifiState, "Connected %s ",WiFi.localIP().toString().c_str());
 
   #ifdef VERBOSE
-  //Serial.print("Connected to wifi ");
-  //Serial.println(WiFi.localIP());
   Serial.println(wifiState);
   #endif
-  wifiConnected = true;
-  return true;
+  return wifiConnected;
 }
 //
 // load wifi credentials from LITTLEFS
@@ -1209,7 +1232,9 @@ void LoadCredentials()
   mqtt_port = LITTLEFS_ReadFile(LITTLEFS, mqtt_portPath);
   mqtt_portVal = atoi(mqtt_port.c_str());
   mqtt_user = LITTLEFS_ReadFile(LITTLEFS, mqtt_userPath);
+  mqtt_user.trim();
   mqtt_password = LITTLEFS_ReadFile(LITTLEFS, mqtt_passwordPath);
+  mqtt_password.trim();
 
 
   wUndergroundID = LITTLEFS_ReadFile(LITTLEFS, wu_IDPath);
