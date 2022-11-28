@@ -846,7 +846,7 @@ bool MQTT_Reconnect()
     if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
     {
       mqttConnect = true;
-      sprintf(mqttState, "Connected - %s", (mqtt_Report ? "Reporting" : "Not reporting"));
+      sprintf(mqttState, "Connected");
       break;
     }
     // Wait before retrying
