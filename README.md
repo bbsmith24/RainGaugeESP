@@ -1,7 +1,6 @@
 ESP32 Rain Gauge
 count clicks of rain gauge toggle, update rain amounts to MQTT and/or Weather Underground. Allows zero of rain values and credentials reset from MQTT
 
-
 based on ESP32_Credentials for getting/storing credentials, time
  set up ESP32 WiFi credentials and time from NTP
 
@@ -31,12 +30,12 @@ ESP32_Credentials Functions:
 
 	loop() - print current time to Serial every minute. Add whatever is needed for new projects here
 
-	SPIFFS functions
-		SPIFFS_Init - initialize the SPIFFS file system
-		SPIFFS_ReadFile - read a file, return contents as a String
-		SPIFFS_WriteFile - create a file using pathname and message
-		SPIFFS_ListDir - list files in SPIFFS (for debugging)
-		SPIFFS_DeleteFile - delete a named file
+	LITTLEFS functions
+		LITTLEFS_Init - initialize the LITTLEFS file system
+		LITTLEFS_ReadFile - read a file, return contents as a String
+		LITTLEFS_WriteFile - create a file using pathname and message
+		LITTLEFS_ListDir - list files in LITTLEFS (for debugging)
+		LITTLEFS_DeleteFile - delete a named file
 
 	WiFi_Init
 		LoadCredentials - read credentials and timezone information from files in SPIFFS
