@@ -1,4 +1,8 @@
-# ESP32_Credentials
+ESP32 Rain Gauge
+count clicks of rain gauge toggle, update rain amounts to MQTT and/or Weather Underground. Allows zero of rain values and credentials reset from MQTT
+
+
+based on ESP32_Credentials for getting/storing credentials, time
  set up ESP32 WiFi credentials and time from NTP
 
 First time running this creates an access point named ESP-WIFI-MANAGER. Connect to this, open a browser
