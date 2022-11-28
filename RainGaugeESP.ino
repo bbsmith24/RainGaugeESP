@@ -45,7 +45,7 @@
     added local time offset from GMT and daylight savings time offset to credentials page - hours now, could be enhanced with a combo box for timezone
 
 */
-#define VERBOSE                 // more output for debugging
+//#define VERBOSE                 // more output for debugging
 #define POWER_STATE_REPORTING  // use INA260 for reporting solar v/mA and microcontroller load V/mA to monitor charging state
 // wait between wifi and MQTT server connect attempts
 #define RECONNECT_DELAY    5000
