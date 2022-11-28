@@ -247,7 +247,8 @@ unsigned long ina260LastMeasure = 0;
 #define INTERVAL_MS            150000 //  2.5 minute interval
 //#define INTERVAL_MS          300000 //    5 minute interval
 //#define MAX_UPDATE_INTERVAL_MS 600000 //   10 minute max between updates
-#define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
+//#define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
+#define MAX_UPDATE_INTERVAL_MS 600000 // 10 minute max between updates
 // rain for current minute, stored for 
 int rainByMinuteIdx = 0;                // current index of by minute rolling buffer
 unsigned int rainByMinute[MIN_PER_DAY]; // circular buffer for every minute value for last 24 hours
@@ -459,18 +460,19 @@ void loop()
       // average power values since last report
       AveragePowerValues();
       
-      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",connectDateTime, 
-                                                                                                  wifiState, 
-                                                                                                  mqttState,
-                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
-                                                                                                  wundergroundState,
-                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
       #ifdef VERBOSE
       Serial.println("Ready to send updates");    
       Serial.println(payloadStr);    
       #endif
       // send report to Weather Underground if enabled
       WU_Report();     
+
+      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",connectDateTime, 
+                                                                                                  wifiState, 
+                                                                                                  mqttState,
+                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
+                                                                                                  wundergroundState,
+                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
 
       // send report to MQTT Host if enables    
       MQTT_Report();
