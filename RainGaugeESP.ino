@@ -170,10 +170,11 @@ WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
 String mqttClientID = "MQTTRainGauge_";   // local name, must be unique on MQTT server so append a random string at the end
 // subscribed (listening) topic(s)
-#define MAX_SUBSCRIBE        3
+#define MAX_SUBSCRIBE        4
 String subscribed_topic[MAX_SUBSCRIBE] =  { "Rain_Gauge/WU_RainGaugeWUReport",      // switch weather underground reporting on/off
                                             "Rain_Gauge/MQTT_RainGaugeMQTTReport",    // switch MQTT reporting on/off
-                                            "Rain_Gauge/RainGauge_Reset"              // clear credentials and restart
+                                            "Rain_Gauge/RainGauge_ZeroValues",    // zero rain gauge values
+                                            "Rain_Gauge/RainGauge_ResetCredentials"              // clear credentials and restart
                                           };
 
 // published (send to server) topic(s)
@@ -894,7 +895,6 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
   Serial.print(" payload  ");
   Serial.println(payloadStr);
 #endif
-
   if(topicStr == "Rain_Gauge/WU_RainGaugeWUReport")
   {
     if(payloadStr == "\"ON\"")
@@ -905,29 +905,11 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
     {
       wUnderground_Report = false;
     }
-    // in either case, zero the rain stats
-    totalTicks = 0;
-    for(int minIdx = 0; minIdx < MIN_PER_DAY; minIdx++)
-    {
-      rainByMinute[minIdx] = 0;
-    }
-    for(int hourIdx = 0; hourIdx < LAST_X_HOURS; hourIdx++)
-    {
-      rainByHour[hourIdx] = 0;
-    }
-    for(int dayIdx = 0; dayIdx < LAST_X_DAYS; dayIdx++)
-    {
-      rainByDay[dayIdx]++;
-    }
-    
-    // update values for web page, output to serial for debug
-    currentRainInches = 0.0F;
-    quarterHourRainInches = 0.0F;
-    hourRainInches = 0.0F;
-    dayRainInches =  0.0F;
     #ifdef VERBOSE
     Serial.printf("Weather Underground reporting %s - rain counts zeroed\n", wUnderground_Report ? "ON" : "OFF");
     #endif
+    // in either case, zero the rain stats
+    ZeroRainCounts();
   }
   if(topicStr == "Rain_Gauge/MQTT_RainGaugeMQTTReport")
   {
@@ -943,12 +925,19 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
     Serial.printf("MQTT reporting %s\n", mqtt_Report ? "ON" : "OFF");
     #endif
   }
-  if(topicStr == "Rain_Gauge/Rain_Gauge/RainGauge_Reset")
+  else if((topicStr == "Rain_Gauge/RainGauge_ResetCredentials") && (payloadStr == "ON"))
   {
     #ifdef VERBOSE
     Serial.println("Reset - clear credentials, restart");
     #endif
     ClearCredentials();
+  }
+  else if((topicStr == "Rain_Gauge/RainGauge_ZeroValues") && (payloadStr == "1"))
+  {
+    #ifdef VERBOSE
+    Serial.println("Zero values");
+    #endif
+    ZeroRainCounts();
   }
 }
 //
