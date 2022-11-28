@@ -459,10 +459,12 @@ void loop()
       // average power values since last report
       AveragePowerValues();
       
-      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s | Weather Underground: %s",connectDateTime, 
-                                                                                        wifiState, 
-                                                                                        mqttState,
-                                                                                        wundergroundState);
+      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",connectDateTime, 
+                                                                                                  wifiState, 
+                                                                                                  mqttState,
+                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
+                                                                                                  wundergroundState,
+                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
       #ifdef VERBOSE
       Serial.println("Ready to send updates");    
       Serial.println(payloadStr);    
@@ -844,7 +846,7 @@ bool MQTT_Reconnect()
     if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
     {
       mqttConnect = true;
-      sprintf(mqttState, "Connected");
+      sprintf(mqttState, "Connected - %s", (mqtt_Report ? "Reporting" : "Not reporting"));
       break;
     }
     // Wait before retrying
