@@ -775,6 +775,7 @@ void MQTT_Report()
     mqttAttemptedReports++;
     if(MQTT_Reconnect())
     {
+      mqttSuccessfulReports++;
       //
       // MQTT update
       //    
@@ -812,7 +813,6 @@ void MQTT_Report()
       published_payload[16] = String(measuredA_max[1]);
       #endif      
       MQTT_PublishTopics();    
-      mqttSuccessfulReports++;
     }
     else
     {
