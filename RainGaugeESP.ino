@@ -215,6 +215,9 @@ char payloadStr[512];
 char mqttState[256];
 bool mqtt_Report = true;
 int mqttAttemptCount = 0;
+uint mqttAttemptedReports = 0;
+uint mqttSuccessfulReports = 0;
+
 //
 // Weather underground credentials
 //
@@ -228,6 +231,8 @@ String wUndergroundID;
 String wUndergroundKey;  
 char wundergroundState[256];
 bool wUnderground_Report = false;
+int wuSuccessfulReports = 0;
+int wuAttemptedReports = 0;
 
 int wUAttemptCount = 0;
 
@@ -656,6 +661,8 @@ void WU_Report()
     #ifdef VERBOSE
     SERIALX.println(">>>>>Update Weather Underground<<<<<");
     #endif
+    wuAttemptedReports++;
+
     //
     // Weather Underground update
     //
@@ -698,7 +705,7 @@ void WU_Report()
       }
       else
       {
-        sprintf(wundergroundState, "Connected %d attempts", wUAttemptCount);
+        sprintf(wundergroundState, "Connected in %d attempts", wUAttemptCount);
       }      
     }
     else
@@ -742,6 +749,10 @@ void WU_Report()
       #endif
       sprintf(wundergroundResponse, "%s", line);          
     }
+    if(wundergroundResponse == "success");
+    {
+      wuSuccessfulReports++;
+    }
     sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
     #ifdef VERBOSE      
     SERIALX.println(wundergroundResponse);
@@ -761,21 +772,26 @@ void MQTT_Report()
 {    
   if(mqtt_Report)
   {
+    mqttAttemptedReports++;
     if(MQTT_Reconnect())
     {
+      //
+      // MQTT update
+      //    
+      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) %d/%d | Weather Underground: %s (%s) %d/%d",localTimeStr, 
+                                                                                                  wifiState, 
+                                                                                                  mqttState,
+                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
+                                                                                                  mqttSuccessfulReports,
+                                                                                                  mqttAttemptedReports,
+                                                                                                  wundergroundState,
+                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"),
+                                                                                                  wuSuccessfulReports,
+                                                                                                  wuAttemptedReports);
       #ifdef VERBOSE
       SERIALX.println(">>>>>MQTT update ON, connected<<<<<");    
       SERIALX.println(payloadStr);
       #endif
-      //
-      // MQTT update
-      //    
-      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",localTimeStr, 
-                                                                                                  wifiState, 
-                                                                                                  mqttState,
-                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
-                                                                                                  wundergroundState,
-                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
       published_payload[0] = String(localTimeStr);
       published_payload[1] = String(quarterHourRainInches, 4);
       published_payload[2] = String(hourRainInches, 4);
@@ -796,6 +812,7 @@ void MQTT_Report()
       published_payload[16] = String(measuredA_max[1]);
       #endif      
       MQTT_PublishTopics();    
+      mqttSuccessfulReports++;
     }
     else
     {
@@ -900,7 +917,7 @@ bool MQTT_Reconnect()
     mqttAttemptCount++;
     if(mqttConnect)
     {
-      sprintf(mqttState, "Connected %d attempts", mqttAttemptCount);
+      sprintf(mqttState, "Connected in %d attempts", mqttAttemptCount);
       delay(RECONNECT_DELAY);
       // set up listeners for server updates  
       MQTT_SubscribeTopics();
