@@ -1,6 +1,7 @@
 /*
   Brian Smith
   November 2022
+  Copyright (c) 2022 Brian B Smith. All rights reserved.
   IOT Rain Gauge
   uses MQTT to update OpenHAB (or any other MQTT server)
   push info to Weather Underground  
@@ -52,6 +53,12 @@
 // wait between sensor updates
 #define CHECK_STATE_DELAY 60000
 #define FORMAT_LITTLEFS_IF_FAILED true
+// for using alternate serial ports
+//#define ALT_SERIAL
+#define SERIALX Serial
+//#define SERIALX Serial2
+#define RXD2 16
+#define TXD2 17
 
 // for Sparkfun ESP32 Thing Plus
 //#define RAINGAUGE_PIN 5  
@@ -110,11 +117,10 @@ IPAddress subnet(255, 255, 0, 0);
 // global variables for time
 //
 // NTP Server Details
-//const char* ntpServer = "pool.ntp.org";
 #define ntpServer "pool.ntp.org"
 
-long  gmtOffset_sec = 0;//-18000;
-int   daylightOffset_sec = 0;// 3600;
+long  gmtOffset_sec = 0;
+int   daylightOffset_sec = 0;
 ESP32Time rtc(0);
 
 int dayNum;
@@ -274,7 +280,6 @@ float priorHourRainInches = 0.0;
 float priorDayRainInches = 0.0;
 
 bool neverUpdated = true;
-unsigned long lastForceUpdate = 0;
 unsigned long lastUpdate = 0;
 volatile bool clicked = false;  // true after rain gauge triggers hall sensor
 //
@@ -283,39 +288,44 @@ volatile bool clicked = false;  // true after rain gauge triggers hall sensor
 void setup()
 {
   #ifdef VERBOSE
-  Serial.begin(115200);
+  // Serial port for debugging purposes
+  #ifndef ALT_SERIAL
+  SERIALX.begin(115200);
+  #else
+  SERIALX.begin(115200, SERIAL_8N1, RXD2, TXD2);
+  #endif
   #endif
 
   #ifdef VERBOSE
-  Serial.println("");
-  Serial.println("BBS Nov 2022");
-  Serial.println("IOT Rain gauge");
-  Serial.println("=======================");
+  SERIALX.println("");
+  SERIALX.println("BBS Nov 2022");
+  SERIALX.println("IOT Rain gauge");
+  SERIALX.println("=======================");
   delay(1000);
   #endif
   // set CPU freq to 80MHz, disable bluetooth  to save power
   #ifdef VERBOSE
   int freq = getCpuFrequencyMhz();
-  Serial.printf("Default Freq\n");
-  Serial.printf("CPU Freq = %dMhz\n", freq);
+  SERIALX.printf("Default Freq\n");
+  SERIALX.printf("CPU Freq = %dMhz\n", freq);
   freq = getXtalFrequencyMhz();
-  Serial.printf("XTAL Freq = %dMhz\n", freq);
+  SERIALX.printf("XTAL Freq = %dMhz\n", freq);
   freq = getApbFrequency();
-  Serial.printf("APB Freq = %dHz\n", freq);
+  SERIALX.printf("APB Freq = %dHz\n", freq);
   #endif
   setCpuFrequencyMhz(80);
   #ifdef VERBOSE
-  Serial.printf("Updated Freq\n");
+  SERIALX.printf("Updated Freq\n");
   freq = getCpuFrequencyMhz();
-  Serial.printf("CPU Freq = %dMhz\n", freq);
+  SERIALX.printf("CPU Freq = %dMhz\n", freq);
   freq = getXtalFrequencyMhz();
-  Serial.printf("XTAL Freq = %dMhz\n", freq);
+  SERIALX.printf("XTAL Freq = %dMhz\n", freq);
   freq = getApbFrequency();
-  Serial.printf("APB Freq = %dHz\n", freq);
+  SERIALX.printf("APB Freq = %dHz\n", freq);
   #endif
   btStop();
   #ifdef VERBOSE
-  Serial.printf("Bluetooth disabled\n");
+  SERIALX.printf("Bluetooth disabled\n");
   #endif  
 
   sprintf(wifiState, "Not connected");
@@ -341,7 +351,7 @@ void setup()
   if(!WiFi_Init()) 
   {
     #ifdef VERBOSE
-    Serial.println("No credentials stored - get from locally hosted page");
+    SERIALX.println("No credentials stored - get from locally hosted page");
     #endif
     GetCredentials();
   }
@@ -362,14 +372,14 @@ void setup()
     sensors[senseIdx] = Adafruit_INA260();
     if (!sensors[senseIdx].begin(i2cAddresses[senseIdx])) 
     {
-      Serial.print("Couldn't find INA260 at 0x");
-      Serial.println(i2cAddresses[senseIdx], HEX);
+      SERIALX.print("Couldn't find INA260 at 0x");
+      SERIALX.println(i2cAddresses[senseIdx], HEX);
       while (1);
     }
-    Serial.print("INA260 connected 0x");
-    Serial.print(i2cAddresses[senseIdx], HEX);
-    Serial.print(" ");
-    Serial.println(sensorDesc[senseIdx]);
+    SERIALX.print("INA260 connected 0x");
+    SERIALX.print(i2cAddresses[senseIdx], HEX);
+    SERIALX.print(" ");
+    SERIALX.println(sensorDesc[senseIdx]);
     measuredV_ave[senseIdx] = 0.0F;
     measuredV_min[senseIdx] = 1000.0F;
     measuredV_max[senseIdx] = 0.0F;
@@ -385,17 +395,17 @@ void setup()
   mqttClientID += String(random(0xffff), HEX);
 
   #ifdef VERBOSE
-  Serial.print("MQTT Server: ");
-  Serial.print(mqtt_server);
-  Serial.print(" ");
-  Serial.println(mqttserverIP.toString());
+  SERIALX.print("MQTT Server: ");
+  SERIALX.print(mqtt_server);
+  SERIALX.print(" ");
+  SERIALX.println(mqttserverIP.toString());
 
-  Serial.print("Port: ");
-  Serial.println(mqtt_portVal);
-  Serial.print("User: ");
-  Serial.println(mqtt_user);
-  Serial.print("Password: ");
-  Serial.println(mqtt_password);
+  SERIALX.print("Port: ");
+  SERIALX.println(mqtt_portVal);
+  SERIALX.print("User: ");
+  SERIALX.println(mqtt_user);
+  SERIALX.print("Password: ");
+  SERIALX.println(mqtt_password);
   #endif
   mqttClient.setServer(mqttserverIP, mqtt_portVal);
   mqttClient.setCallback(MQTT_Callback);
@@ -432,7 +442,7 @@ void loop()
       timeCheckInterval += ((30 - (secondNum % 30)) * 1000);
     }
     #ifdef VERBOSE
-    Serial.printf("Time check interval %d\n", timeCheckInterval);
+    SERIALX.printf("Time check interval %d\n", timeCheckInterval);
     #endif
     lastTimeCheck = now;
   }
@@ -461,8 +471,7 @@ void loop()
       AveragePowerValues();
       
       #ifdef VERBOSE
-      Serial.println("Ready to send updates");    
-      Serial.println(payloadStr);    
+      SERIALX.println("Ready to send updates");    
       #endif
       // send report to Weather Underground if enabled
       WU_Report();     
@@ -474,7 +483,7 @@ void loop()
                                                                                                   wundergroundState,
                                                                                                   (wUnderground_Report ? "Reporting" : "Not reporting"));
 
-      // send report to MQTT Host if enables    
+      // send report to MQTT Host if enabled
       MQTT_Report();
 
       // update last reported values, newver updated, and last update time
@@ -483,8 +492,9 @@ void loop()
       priorDayRainInches = dayRainInches;
       neverUpdated = false;
       lastUpdate = now;
+      ZeroPowerValues();      
       #ifdef VERBOSE
-      Serial.printf("time %d next update check at %d\n", millis(), (lastUpdate + INTERVAL_MS));    
+      SERIALX.printf("time %d next update check at %d\n", millis(), (lastUpdate + INTERVAL_MS));    
       #endif
     }
   }
@@ -495,7 +505,7 @@ void loop()
 void ZeroRainCounts()
 {
   #ifdef VERBOSE
-  Serial.println("ZeroRainCounts()");
+  SERIALX.println("ZeroRainCounts()");
   #endif
   for(int idx = 0; idx < MIN_PER_DAY; idx++)
   {
@@ -510,7 +520,7 @@ void ZeroRainCounts()
     rainByDay[idx] = 0;
   }
   #ifdef VERBOSE
-  Serial.println("Rain counts zeroed");
+  SERIALX.println("Rain counts zeroed");
   #endif
   delay(1000);
 }
@@ -528,10 +538,10 @@ void ReadPowerState()
       ina260Val = sensors[senseIdx].readBusVoltage()/1000.0F;
       ina260Val = ina260Val >= 0.0F ? ina260Val : 0.0F;
       #ifdef VERBOSE
-      Serial.print(sensorDesc[senseIdx]);
-      Serial.print(" ");
-      Serial.print(ina260Val);
-      Serial.print("V ");
+      SERIALX.print(sensorDesc[senseIdx]);
+      SERIALX.print(" ");
+      SERIALX.print(ina260Val);
+      SERIALX.print("V ");
       #endif
       measuredV_ave[senseIdx] += ina260Val;
       measuredV_min[senseIdx] = ina260Val < measuredV_min[senseIdx] ? ina260Val : measuredV_min[senseIdx];
@@ -539,16 +549,16 @@ void ReadPowerState()
       ina260Val = sensors[senseIdx].readCurrent();
       ina260Val = ina260Val >= 0.0F ? ina260Val : 0.0F;
       #ifdef VERBOSE
-      Serial.print(ina260Val);
-      Serial.print("mA ");
+      SERIALX.print(ina260Val);
+      SERIALX.print("mA ");
       #endif
       measuredA_ave[senseIdx] += ina260Val;
       measuredA_min[senseIdx] = ina260Val < measuredA_min[senseIdx] ? ina260Val : measuredA_min[senseIdx];
       measuredA_max[senseIdx] = ina260Val > measuredA_max[senseIdx] ? ina260Val : measuredA_max[senseIdx];
     }
     ina260MeasureCount++;
-    Serial.print(" measurements ");
-    Serial.println(ina260MeasureCount);
+    SERIALX.print(" measurements ");
+    SERIALX.println(ina260MeasureCount);
     ina260LastMeasure = millis();
   }
   #endif   
@@ -588,7 +598,7 @@ void UpdateBufferIndices()
   #ifdef VERBOSE
   if(indexChanged)
   {
-    Serial.printf("%s\tIndices: Minute %d\tHour %d\tDay %d\n", localTimeStr, rainByMinuteIdx, rainByHourIdx, rainByDayIdx);
+    SERIALX.printf("%s\tIndices: Minute %d\tHour %d\tDay %d\n", localTimeStr, rainByMinuteIdx, rainByHourIdx, rainByDayIdx);
   }
   #endif
 }
@@ -601,7 +611,7 @@ void RainGaugeClicked()
   {
     clicked = false;
     #ifdef VERBOSE
-    Serial.println(">>>>>click<<<<<");
+    SERIALX.println(">>>>>click<<<<<");
     #endif
     rainByMinute[rainByMinuteIdx]++;
     rainByHour[rainByHourIdx]++;
@@ -648,7 +658,7 @@ void WU_Report()
   if(wUnderground_Report == true)
   {
     #ifdef VERBOSE
-    Serial.println(">>>>>Update Weather Underground<<<<<");
+    SERIALX.println(">>>>>Update Weather Underground<<<<<");
     #endif
     //
     // Weather Underground update
@@ -669,12 +679,12 @@ void WU_Report()
     // Connnect to Weather Underground. If the connection fails, return from
     //  loop and start over again.
     #ifdef VERBOSE      
-    Serial.println(">>>>>Update Weather Underground<<<<<");    
+    SERIALX.println(">>>>>Update Weather Underground<<<<<");    
     #endif
     if (!wifiClient.connect(host, 80))
     {
       #ifdef VERBOSE      
-      Serial.println("Weather Underground connection failed");
+      SERIALX.println("Weather Underground connection failed");
       #endif
       sprintf(wundergroundState, "Not connected");
       return;
@@ -682,7 +692,7 @@ void WU_Report()
     else
     {
       #ifdef VERBOSE      
-      Serial.println("Weather Underground connected");
+      SERIALX.println("Weather Underground connected");
       #endif
       sprintf(wundergroundState, "Connected");
     }
@@ -699,7 +709,7 @@ void WU_Report()
       if (millis() - timeout > 5000) 
       {
         #ifdef VERBOSE      
-        Serial.println(">>> Client Timeout !");
+        SERIALX.println(">>> WU Update - client Timeout !");
         #endif
         wifiClient.stop();
         sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
@@ -711,17 +721,18 @@ void WU_Report()
     while(wifiClient.available()) 
     {
       String line = wifiClient.readStringUntil('\r');
+      SERIALX.println(line);
       sprintf(wundergroundResponse, "%s", line);          
     }
     sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
     #ifdef VERBOSE      
-    Serial.println(wundergroundResponse);
+    SERIALX.println(wundergroundResponse);
     #endif      
   }
   else
   {
     #ifdef VERBOSE
-    Serial.println(">>>>>Weather Underground reporting OFF<<<<<");
+    SERIALX.println(">>>>>Weather Underground reporting OFF<<<<<");
     #endif
   }
 }
@@ -733,8 +744,8 @@ void MQTT_Report()
   if(mqtt_Report)
   {
     #ifdef VERBOSE
-    Serial.println(">>>>>MQTT update ON<<<<<");    
-    Serial.println(payloadStr);
+    SERIALX.println(">>>>>MQTT update ON<<<<<");    
+    SERIALX.println(payloadStr);
     #endif
     //
     // MQTT update
@@ -762,20 +773,8 @@ void MQTT_Report()
   }
   else
   {
-    Serial.println(">>>>>MQTT update OFF<<<<<");    
+    SERIALX.println(">>>>>MQTT update OFF<<<<<");    
   }
-  #ifdef POWER_STATE_REPORTING
-  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
-  {
-    measuredV_ave[senseIdx] = 0.0F;
-    measuredV_min[senseIdx] = 1000.0F;
-    measuredV_max[senseIdx] = 0.0F;
-    measuredA_ave[senseIdx] = 0.0F;
-    measuredA_min[senseIdx]= 1000.0F;;
-    measuredA_max[senseIdx] = 0.0F;
-    ina260MeasureCount = 0;    
-  }
-  #endif    
 }
 //
 // average solar and battery power values if enabled
@@ -792,7 +791,7 @@ void AveragePowerValues()
   #ifdef VERBOSE
   for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
   {
-    Serial.printf("\t%s\tV ave %0.1f min %0.1f max %0.1f\t mA ave %0.1f min %0.1f max %0.1f\n", sensorDesc[senseIdx].c_str(),
+    SERIALX.printf("\t%s\tV ave %0.1f min %0.1f max %0.1f\t mA ave %0.1f min %0.1f max %0.1f\n", sensorDesc[senseIdx].c_str(),
                                                                                                  measuredV_ave[senseIdx], 
                                                                                                  measuredV_min[senseIdx], 
                                                                                                  measuredV_max[senseIdx], 
@@ -803,6 +802,24 @@ void AveragePowerValues()
   #endif    
   #endif    
 }      
+//
+//
+//
+void ZeroPowerValues()
+{
+  #ifdef POWER_STATE_REPORTING
+  for(int senseIdx = 0; senseIdx < INA260_COUNT; senseIdx++)
+  {
+    measuredV_ave[senseIdx] = 0.0F;
+    measuredV_min[senseIdx] = 1000.0F;
+    measuredV_max[senseIdx] = 0.0F;
+    measuredA_ave[senseIdx] = 0.0F;
+    measuredA_min[senseIdx]= 1000.0F;;
+    measuredA_max[senseIdx] = 0.0F;
+    ina260MeasureCount = 0;    
+  }
+  #endif    
+}
 //
 // trigger on hall sensor low as magnet passes by
 //
@@ -831,18 +848,18 @@ bool MQTT_Reconnect()
     sprintf(mqttState, "Not connected");
     mqttConnect = false;
     #ifdef VERBOSE
-    Serial.printf("MQTT connect attempt %d ", (attemptCount + 1));
-    Serial.print(" Server IP: >");
-    Serial.print(mqttserverIP.toString());
-    Serial.print("< Port: >");
-    Serial.print(mqtt_portVal);
-    Serial.print("< mqttClientID: >");
-    Serial.print(mqttClientID);
-    Serial.print("< mqtt_user: >");
-    Serial.print(mqtt_user);
-    Serial.print("< mqtt_password: >");
-    Serial.print(mqtt_password);
-    Serial.println("<");
+    SERIALX.printf("MQTT connect attempt %d ", (attemptCount + 1));
+    SERIALX.print(" Server IP: >");
+    SERIALX.print(mqttserverIP.toString());
+    SERIALX.print("< Port: >");
+    SERIALX.print(mqtt_portVal);
+    SERIALX.print("< mqttClientID: >");
+    SERIALX.print(mqttClientID);
+    SERIALX.print("< mqtt_user: >");
+    SERIALX.print(mqtt_user);
+    SERIALX.print("< mqtt_password: >");
+    SERIALX.print(mqtt_password);
+    SERIALX.println("<");
     #endif
     // connected, subscribe and publish
     if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
@@ -857,21 +874,21 @@ bool MQTT_Reconnect()
   }
   if(!mqttConnect)
   {
-    Serial.print("MQTT not connected!");
-    Serial.print(" Server IP: ");
-    Serial.print(mqttserverIP.toString());
-    Serial.print(" Port: ");
-    Serial.print(mqtt_portVal);
-    Serial.print(" mqttClientID: ");
-    Serial.print(mqttClientID.c_str());
-    Serial.print(" mqtt_user: ");
-    Serial.print(mqtt_user.c_str());
-    Serial.print(" mqtt_password: ");
-    Serial.println(mqtt_password.c_str());
+    SERIALX.print("MQTT not connected!");
+    SERIALX.print(" Server IP: ");
+    SERIALX.print(mqttserverIP.toString());
+    SERIALX.print(" Port: ");
+    SERIALX.print(mqtt_portVal);
+    SERIALX.print(" mqttClientID: ");
+    SERIALX.print(mqttClientID.c_str());
+    SERIALX.print(" mqtt_user: ");
+    SERIALX.print(mqtt_user.c_str());
+    SERIALX.print(" mqtt_password: ");
+    SERIALX.println(mqtt_password.c_str());
     return mqttConnect;
   }
   delay(RECONNECT_DELAY);
-  Serial.println("MQTT connected!");
+  SERIALX.println("MQTT connected!");
   // we're connected
   // set up listeners for server updates  
   MQTT_SubscribeTopics();
@@ -893,12 +910,12 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
   {
     payloadStr += (char)payload[i];
   }
-#ifdef VERBOSE
-  Serial.print("MQTT_Callback ");
-  Serial.print(topic);
-  Serial.print(" payload  ");
-  Serial.println(payloadStr);
-#endif
+  #ifdef VERBOSE
+  SERIALX.print("MQTT_Callback ");
+  SERIALX.print(topic);
+  SERIALX.print(" payload  ");
+  SERIALX.println(payloadStr);
+  #endif
   if(topicStr == "Rain_Gauge/WU_RainGaugeWUReport")
   {
     if(payloadStr == "\"ON\"")
@@ -910,7 +927,7 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
       wUnderground_Report = false;
     }
     #ifdef VERBOSE
-    Serial.printf("Weather Underground reporting %s - rain counts zeroed\n", wUnderground_Report ? "ON" : "OFF");
+    SERIALX.printf("Weather Underground reporting %s - rain counts zeroed\n", wUnderground_Report ? "ON" : "OFF");
     #endif
     // in either case, zero the rain stats
     ZeroRainCounts();
@@ -926,20 +943,20 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
       mqtt_Report = false;
     }
     #ifdef VERBOSE
-    Serial.printf("MQTT reporting %s\n", mqtt_Report ? "ON" : "OFF");
+    SERIALX.printf("MQTT reporting %s\n", mqtt_Report ? "ON" : "OFF");
     #endif
   }
   else if((topicStr == "Rain_Gauge/RainGauge_ResetCredentials") && (payloadStr == "ON"))
   {
     #ifdef VERBOSE
-    Serial.println("Reset - clear credentials, restart");
+    SERIALX.println("Reset - clear credentials, restart");
     #endif
     ClearCredentials();
   }
   else if((topicStr == "Rain_Gauge/RainGauge_ZeroValues") && (payloadStr == "1"))
   {
     #ifdef VERBOSE
-    Serial.println("Zero values");
+    SERIALX.println("Zero values");
     #endif
     ZeroRainCounts();
   }
@@ -954,7 +971,7 @@ void MQTT_SubscribeTopics()
   {
     subscribed = mqttClient.subscribe(subscribed_topic[idx].c_str());
     #ifdef VERBOSE
-    Serial.printf("subscribing topic %s %s\n", subscribed_topic[idx].c_str(), (subscribed ? "success!" : "failed"));
+    SERIALX.printf("subscribing topic %s %s\n", subscribed_topic[idx].c_str(), (subscribed ? "success!" : "failed"));
     #endif
   }
 }
@@ -973,19 +990,19 @@ bool MQTT_PublishTopics()
   //
   if(!connected)
   {
-    Serial.println("MQTT not connected in MQTT_PublishTopics()");
+    SERIALX.println("MQTT not connected in MQTT_PublishTopics()");
     return connected;
   }
   int pubSubResult = 0;
   for(int idx = 0; idx < MAX_PUBLISH; idx++)
   {
     pubSubResult = mqttClient.publish(published_topic[idx].c_str(), published_payload[idx].c_str());
-#ifdef VERBOSE
-    Serial.print((pubSubResult == 0 ? "FAIL TO PUBLISH Topic: " : "PUBLISHED Topic: "));
-    Serial.print(published_topic[idx]);
-    Serial.print(" ");
-    Serial.println(published_payload[idx]);
-#endif
+    #ifdef VERBOSE
+    SERIALX.print((pubSubResult == 0 ? "FAIL TO PUBLISH Topic: " : "PUBLISHED Topic: "));
+    SERIALX.print(published_topic[idx]);
+    SERIALX.print(" ");
+    SERIALX.println(published_payload[idx]);
+    #endif
   }
   return connected;
 }
@@ -1001,12 +1018,12 @@ void LITTLEFS_Init()
   if (!LITTLEFS.begin(true)) 
   {
     #ifdef VERBOSE
-    Serial.println("An error has occurred while mounting LITTLEFS");
+    SERIALX.println("An error has occurred while mounting LITTLEFS");
     #endif
     return;
   }
   #ifdef VERBOSE
-  Serial.println("LITTLEFS mounted successfully");
+  SERIALX.println("LITTLEFS mounted successfully");
   #endif
 }
 //
@@ -1015,13 +1032,13 @@ void LITTLEFS_Init()
 String LITTLEFS_ReadFile(fs::FS &fs, const char * path)
 {
   #ifdef VERBOSE
-  Serial.printf("Reading file: %s - ", path);
+  SERIALX.printf("Reading file: %s - ", path);
   #endif
   File file = fs.open(path);
   if(!file || file.isDirectory())
   {
     #ifdef VERBOSE
-    Serial.println("- failed to open file for reading");
+    SERIALX.println("- failed to open file for reading");
     #endif
     return String();
   }
@@ -1030,12 +1047,12 @@ String LITTLEFS_ReadFile(fs::FS &fs, const char * path)
   while(file.available())
   {
     fileContent = file.readStringUntil('\n');
-    //#ifdef VERBOSE
-    //Serial.println(fileContent);
-    //#endif
+    #ifdef VERBOSE
+    //SERIALX.println(fileContent);
+    #endif
   }
     #ifdef VERBOSE
-    Serial.println("- read file");
+    SERIALX.println("- read file");
     #endif
   return fileContent;
 }
@@ -1045,26 +1062,26 @@ String LITTLEFS_ReadFile(fs::FS &fs, const char * path)
 void LITTLEFS_WriteFile(fs::FS &fs, const char * path, const char * message)
 {
   #ifdef VERBOSE
-  Serial.printf("Writing >>%s<< to file: %s ", message, path);
+  SERIALX.printf("Writing >>%s<< to file: %s ", message, path);
   #endif
   File file = fs.open(path, FILE_WRITE);
   if(!file)
   {
     #ifdef VERBOSE
-    Serial.println("- failed to open file for writing");
+    SERIALX.println("- failed to open file for writing");
     #endif
     return;
   }
   if(file.print(message))
   {
     #ifdef VERBOSE
-    Serial.println("- file written");
+    SERIALX.println("- file written");
     #endif
   }
    else 
    {
     #ifdef VERBOSE
-    Serial.println("- file write failed");
+    SERIALX.println("- file write failed");
     #endif
   }
 }
@@ -1073,17 +1090,17 @@ void LITTLEFS_WriteFile(fs::FS &fs, const char * path, const char * message)
 //
 void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
 {
-    Serial.printf("Listing directory: %s\r\n", dirname);
+    SERIALX.printf("Listing directory: %s\r\n", dirname);
 
     File root = fs.open(dirname);
     if(!root)
     {
-        Serial.println("- failed to open directory");
+        SERIALX.println("- failed to open directory");
         return;
     }
     if(!root.isDirectory())
     {
-        Serial.println(" - not a directory");
+        SERIALX.println(" - not a directory");
         return;
     }
 
@@ -1092,8 +1109,8 @@ void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
     {
         if(file.isDirectory())
         {
-            Serial.print("  DIR : ");
-            Serial.println(file.name());
+            SERIALX.print("  DIR : ");
+            SERIALX.println(file.name());
             if(levels)
             {
                 LITTLEFS_ListDir(fs, file.name(), levels -1);
@@ -1101,10 +1118,10 @@ void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
         }
          else 
          {
-            Serial.print("  FILE: ");
-            Serial.print(file.name());
-            Serial.print("\tSIZE: ");
-            Serial.println(file.size());
+            SERIALX.print("  FILE: ");
+            SERIALX.print(file.name());
+            SERIALX.print("\tSIZE: ");
+            SERIALX.println(file.size());
         }
         file = root.openNextFile();
     }
@@ -1115,18 +1132,18 @@ void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
 void LITTLEFS_DeleteFile(fs::FS &fs, const char * path)
 {
   #ifdef VERBOSE
-  Serial.printf("Deleting file: %s ", path);
+  SERIALX.printf("Deleting file: %s ", path);
   #endif
   if(fs.remove(path))
   {
     #ifdef VERBOSE
-    Serial.println("- file deleted");
+    SERIALX.println("- file deleted");
     #endif
   }
   else 
   {
     #ifdef VERBOSE
-    Serial.println("- delete failed");
+    SERIALX.println("- delete failed");
     #endif
   }
 }
@@ -1141,7 +1158,7 @@ bool WiFi_Init()
   if(ssid=="")
   {
     #ifdef VERBOSE
-    Serial.println("Undefined SSID");
+    SERIALX.println("Undefined SSID");
     #endif    
     wifiConnected = false;
     return false;
@@ -1155,12 +1172,12 @@ bool WiFi_Init()
   if((ip != "") || (gateway != ""))
   {
     #ifdef VERBOSE
-    Serial.printf("Configure wifi localIP %s gateway %s\n", ip, gateway);
+    SERIALX.printf("Configure wifi localIP %s gateway %s\n", ip, gateway);
     #endif
     if (!WiFi.config(localIP, localGateway, subnet))
     {
       #ifdef VERBOSE
-      Serial.println("STA Failed to configure");
+      SERIALX.println("STA Failed to configure");
       #endif
       wifiConnected = false;
       return false;
@@ -1169,13 +1186,13 @@ bool WiFi_Init()
   else
   {
     #ifdef VERBOSE  
-    Serial.println("Connect to wifi with DNS assigned IP");
+    SERIALX.println("Connect to wifi with DNS assigned IP");
     #endif
   }
   // set up and connect to wifi
   WiFi.begin(ssid.c_str(), pass.c_str());
   #ifdef VERBOSE
-  Serial.printf("Connecting to WiFi SSID: %s PWD: %s...", ssid.c_str(), pass.c_str());
+  SERIALX.printf("Connecting to WiFi SSID: %s PWD: %s...", ssid.c_str(), pass.c_str());
   #endif
   unsigned long currentMillis = millis();
   previousMillis = currentMillis;
@@ -1189,7 +1206,7 @@ bool WiFi_Init()
     if (currentMillis - previousMillis >= WIFI_WAIT) 
     {
       #ifdef VERBOSE
-      Serial.printf("Failed to connect on try %d of 10.", retryCount+1);
+      SERIALX.printf("Failed to connect on try %d of 10.", retryCount+1);
       #endif
       wifiConnected = false;
       retryCount++;
@@ -1199,13 +1216,13 @@ bool WiFi_Init()
   wifiConnected = (WiFi.status() == WL_CONNECTED);
   if(!wifiConnected)
   {
-      Serial.printf("Failed to connect after 10 attempts - reset credentials");
+      SERIALX.printf("Failed to connect after 10 attempts - reset credentials");
       ClearCredentials();
   }
   sprintf(wifiState, "Connected %s ",WiFi.localIP().toString().c_str());
 
   #ifdef VERBOSE
-  Serial.println(wifiState);
+  SERIALX.println(wifiState);
   #endif
   return wifiConnected;
 }
@@ -1215,18 +1232,26 @@ bool WiFi_Init()
 void LoadCredentials()
 {
   ssid = LITTLEFS_ReadFile(LITTLEFS, ssidPath);
+  ssid.trim();
   pass = LITTLEFS_ReadFile(LITTLEFS, passPath);
+  pass.trim();
   ip = LITTLEFS_ReadFile(LITTLEFS, ipPath);
+  ip.trim();
   gateway = LITTLEFS_ReadFile (LITTLEFS, gatewayPath);
+  gateway.trim();
   tz = LITTLEFS_ReadFile (LITTLEFS, tzPath);
+  tz.trim();
   dst = LITTLEFS_ReadFile (LITTLEFS, dstPath);
+  dst.trim();
   
   gmtOffset_sec = atoi(tz.c_str()) * 3600; // convert hours to seconds
   daylightOffset_sec = atoi(dst.c_str()) * 3600; // convert hours to seconds
 
   mqtt_server = LITTLEFS_ReadFile(LITTLEFS, mqtt_serverPath);
+  mqtt_server.trim();
   mqttserverIP.fromString(mqtt_server);
   mqtt_port = LITTLEFS_ReadFile(LITTLEFS, mqtt_portPath);
+  mqtt_port.trim();
   mqtt_portVal = atoi(mqtt_port.c_str());
   mqtt_user = LITTLEFS_ReadFile(LITTLEFS, mqtt_userPath);
   mqtt_user.trim();
@@ -1235,42 +1260,44 @@ void LoadCredentials()
 
 
   wUndergroundID = LITTLEFS_ReadFile(LITTLEFS, wu_IDPath);
+  wUndergroundID.trim();
   wUndergroundKey = LITTLEFS_ReadFile(LITTLEFS, wu_KeyPath);
+  wUndergroundKey.trim();
   
   LITTLEFS_ReadFile(LITTLEFS, "/wifimanager.html");
   #ifdef VERBOSE
-  Serial.print("SSID: ");
-  Serial.println(ssid);
-  Serial.print("PASSWORD: ");
-  Serial.println(pass);
-  Serial.print("Fixed IP (optional): ");
-  Serial.println(ip);
-  Serial.print("Fixed gateway (optional): ");
-  Serial.println(gateway);
-  Serial.print("Timezone offset: ");
-  Serial.print(tz);
-  Serial.print(" ");
-  Serial.println(gmtOffset_sec);
-  Serial.print("DST offset: ");
-  Serial.print(dst);
-  Serial.print(" ");
-  Serial.println(daylightOffset_sec);
+  SERIALX.print("SSID: ");
+  SERIALX.println(ssid);
+  SERIALX.print("PASSWORD: ");
+  SERIALX.println(pass);
+  SERIALX.print("Fixed IP (optional): ");
+  SERIALX.println(ip);
+  SERIALX.print("Fixed gateway (optional): ");
+  SERIALX.println(gateway);
+  SERIALX.print("Timezone offset: ");
+  SERIALX.print(tz);
+  SERIALX.print(" ");
+  SERIALX.println(gmtOffset_sec);
+  SERIALX.print("DST offset: ");
+  SERIALX.print(dst);
+  SERIALX.print(" ");
+  SERIALX.println(daylightOffset_sec);
 
-  Serial.println("MQTT credentials");
-  Serial.print("Server: ");
-  Serial.println(mqtt_server);
-  Serial.print("Port: ");
-  Serial.println(mqtt_port);
-  Serial.print("User: ");
-  Serial.println(mqtt_user);
-  Serial.print("Password: ");
-  Serial.println(mqtt_password);
+  SERIALX.println("MQTT credentials");
+  SERIALX.print("Server: ");
+  SERIALX.println(mqtt_server);
+  SERIALX.print("Port: ");
+  SERIALX.println(mqtt_port);
+  SERIALX.print("User: ");
+  SERIALX.println(mqtt_user);
+  SERIALX.print("Password: ");
+  SERIALX.println(mqtt_password);
 
-  Serial.println("Weather Underground credentials");
-  Serial.print("ID : ");
-  Serial.println(wUndergroundID);
-  Serial.print("Key: ");
-  Serial.println(wUndergroundKey);
+  SERIALX.println("Weather Underground credentials");
+  SERIALX.print("ID : ");
+  SERIALX.println(wUndergroundID);
+  SERIALX.print("Key: ");
+  SERIALX.println(wUndergroundKey);
 
   #endif
 }
@@ -1283,21 +1310,21 @@ void GetCredentials()
   disableCore1WDT();
   // Connect to Wi-Fi network with SSID and password
   #ifdef VERBOSE
-  Serial.print("Setting AP (Access Point) ");
+  SERIALX.print("Setting AP (Access Point) ");
   #endif
   // NULL sets an open Access Point
   WiFi.softAP("ESP-WIFI-MANAGER", NULL);
 
   IPAddress IP = WiFi.softAPIP();
   #ifdef VERBOSE
-  Serial.print(" address: ");
-  Serial.println(IP); 
+  SERIALX.print(" address: ");
+  SERIALX.println(IP); 
   #endif
   // Web Server Root URL
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
   {
     #ifdef VERBOSE
-    Serial.println("Request from webserver, send page");
+    SERIALX.println("Request from webserver, send page");
     #endif  
     request->send(LITTLEFS, "/wifimanager.html", "text/html");
   });
@@ -1320,7 +1347,7 @@ void GetCredentials()
         {
           ssid = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_1, ssid);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_1, ssid);
           #endif
         }
         // HTTP POST password value
@@ -1328,7 +1355,7 @@ void GetCredentials()
         {
           pass = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_2, pass);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_2, pass);
           #endif
         }
         // HTTP POST local ip value
@@ -1336,7 +1363,7 @@ void GetCredentials()
         {
           ip = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_3, ip);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_3, ip);
           #endif
         }
         // HTTP POST gateway ip value
@@ -1344,7 +1371,7 @@ void GetCredentials()
         {
           gateway = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_4, gateway);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_4, gateway);
           #endif
         }
         // HTTP POST time zone offset value
@@ -1352,7 +1379,7 @@ void GetCredentials()
         {
           tz = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_5, tz);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_5, tz);
           #endif
         }
         // HTTP POST dst offset value
@@ -1360,7 +1387,7 @@ void GetCredentials()
         {
           dst = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_6, dst);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_6, dst);
           #endif
         }
         // HTTP POST mqtt server ip value
@@ -1368,7 +1395,7 @@ void GetCredentials()
         {
           mqtt_server = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_7, mqtt_server);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_7, mqtt_server);
           #endif
         }
         // HTTP POST mqtt port value
@@ -1376,7 +1403,7 @@ void GetCredentials()
         {
           mqtt_port = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_8, mqtt_port);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_8, mqtt_port);
           #endif
         }
         // HTTP POST mqtt username value
@@ -1384,7 +1411,7 @@ void GetCredentials()
         {
           mqtt_user = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_9, mqtt_user);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_9, mqtt_user);
           #endif
         }
         // HTTP POST mqtt password value
@@ -1392,7 +1419,7 @@ void GetCredentials()
         {
           mqtt_password = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_10, mqtt_password);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_10, mqtt_password);
           #endif
         }
         // Weather Underground credentials
@@ -1401,7 +1428,7 @@ void GetCredentials()
         {
           wUndergroundID = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_11, wUndergroundID);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_11, wUndergroundID);
           #endif
         }
         // HTTP POST Weather Underground Key
@@ -1409,14 +1436,14 @@ void GetCredentials()
         {
           wUndergroundKey = p->value().c_str();
           #ifdef VERBOSE
-          Serial.printf("%s %s\n", PARAM_INPUT_12, wUndergroundKey);
+          SERIALX.printf("%s %s\n", PARAM_INPUT_12, wUndergroundKey);
           #endif
         }
       }
     } 
     request->send(200, "text/plain", "Done. ESP will restart, connect to your router and go to IP address: " + ip);
     #ifdef VERBOSE
-    Serial.println("Store credentials in LITTLEFS and reboot");
+    SERIALX.println("Store credentials in LITTLEFS and reboot");
     #endif
     SaveCredentials();
   });
@@ -1437,30 +1464,30 @@ void SaveCredentials()
   LITTLEFS_WriteFile(LITTLEFS, wu_IDPath, wUndergroundID.c_str());
   LITTLEFS_WriteFile(LITTLEFS, wu_KeyPath, wUndergroundKey.c_str());
   #ifdef VERBOSE
-  Serial.print("SSID set to: ");
-  Serial.println(ssid);
-  Serial.print("Password set to: ");
-  Serial.println(pass);
-  Serial.print("IP Address set to: ");
-  Serial.println(ip);
-  Serial.print("Time zone offset set to: ");
-  Serial.println(tz);
-  Serial.print("DST offset set to: ");
-  Serial.println(dst);
-  Serial.print("Gateway set to: ");
-  Serial.println(gateway);
-  Serial.print("MQTT server IP: ");
-  Serial.println(mqtt_server);
-  Serial.print("MQTT port: ");
-  Serial.println(mqtt_port);
-  Serial.print("MQTT username: ");
-  Serial.println(mqtt_user);
-  Serial.print("MQTT password: ");
-  Serial.println(mqtt_password);
-  Serial.print("Weather Underground ID: ");
-  Serial.println(wUndergroundID);
-  Serial.print("Weather Underground Key: ");
-  Serial.println(wUndergroundKey);
+  SERIALX.print("SSID set to: ");
+  SERIALX.println(ssid);
+  SERIALX.print("Password set to: ");
+  SERIALX.println(pass);
+  SERIALX.print("IP Address set to: ");
+  SERIALX.println(ip);
+  SERIALX.print("Time zone offset set to: ");
+  SERIALX.println(tz);
+  SERIALX.print("DST offset set to: ");
+  SERIALX.println(dst);
+  SERIALX.print("Gateway set to: ");
+  SERIALX.println(gateway);
+  SERIALX.print("MQTT server IP: ");
+  SERIALX.println(mqtt_server);
+  SERIALX.print("MQTT port: ");
+  SERIALX.println(mqtt_port);
+  SERIALX.print("MQTT username: ");
+  SERIALX.println(mqtt_user);
+  SERIALX.print("MQTT password: ");
+  SERIALX.println(mqtt_password);
+  SERIALX.print("Weather Underground ID: ");
+  SERIALX.println(wUndergroundID);
+  SERIALX.print("Weather Underground Key: ");
+  SERIALX.println(wUndergroundKey);
   #endif
   ESP.restart();
 }
@@ -1471,7 +1498,7 @@ void SaveCredentials()
 void ClearCredentials()
 {
   #ifdef VERBOSE
-  Serial.println("Clear WiFi credentials");
+  SERIALX.println("Clear WiFi credentials");
   #endif
   LITTLEFS_DeleteFile(LITTLEFS, ssidPath);
   LITTLEFS_DeleteFile(LITTLEFS, passPath);
@@ -1489,7 +1516,7 @@ void ClearCredentials()
   LITTLEFS_DeleteFile(LITTLEFS, wu_KeyPath);
   
   #ifdef VERBOSE
-  Serial.println("Restart...");
+  SERIALX.println("Restart...");
   #endif
   delay(WIFI_WAIT);
   ESP.restart();
@@ -1509,7 +1536,7 @@ void UpdateLocalTime()
   if(!rtcTimeSet)
   {
     #ifdef VERBOSE
-    Serial.print("Time from NTP server ");
+    SERIALX.print("Time from NTP server ");
     #endif
     struct tm timeinfo;
     if(!getLocalTime(&timeinfo))
@@ -1546,7 +1573,7 @@ void UpdateLocalTime()
   else
   {
     #ifdef VERBOSE
-    Serial.print("Time from local RTC ");
+    SERIALX.print("Time from local RTC ");
     #endif
     dayNum = rtc.getDay();
     monthNum = rtc.getMonth() + 1;
@@ -1569,7 +1596,7 @@ void UpdateLocalTime()
     connectDateTimeSet = true;
   }
   #ifdef VERBOSE
-  Serial.println(localTimeStr);
+  SERIALX.println(localTimeStr);
   #endif
 }
 // ================================ end NTP/RTC time functions ================================
