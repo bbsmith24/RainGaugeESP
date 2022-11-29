@@ -214,6 +214,7 @@ String published_payload[MAX_PUBLISH];
 char payloadStr[512];
 char mqttState[256];
 bool mqtt_Report = true;
+int mqttAttemptCount = 0;
 //
 // Weather underground credentials
 //
@@ -227,6 +228,8 @@ String wUndergroundID;
 String wUndergroundKey;  
 char wundergroundState[256];
 bool wUnderground_Report = false;
+
+int wUAttemptCount = 0;
 
 #ifdef POWER_STATE_REPORTING
 #define INA260_COUNT 2
@@ -476,13 +479,6 @@ void loop()
       // send report to Weather Underground if enabled
       WU_Report();     
 
-      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",connectDateTime, 
-                                                                                                  wifiState, 
-                                                                                                  mqttState,
-                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
-                                                                                                  wundergroundState,
-                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
-
       // send report to MQTT Host if enabled
       MQTT_Report();
 
@@ -678,23 +674,40 @@ void WU_Report()
     url += dayRainInches;
     // Connnect to Weather Underground. If the connection fails, return from
     //  loop and start over again.
-    #ifdef VERBOSE      
-    SERIALX.println(">>>>>Update Weather Underground<<<<<");    
-    #endif
-    if (!wifiClient.connect(host, 80))
+    wUAttemptCount = 1;
+    bool wuConnected = wifiClient.connect(host, 80);
+    while (!wuConnected && (wUAttemptCount < 10)) 
     {
       #ifdef VERBOSE      
       SERIALX.println("Weather Underground connection failed");
       #endif
       sprintf(wundergroundState, "Not connected");
-      return;
+      wUAttemptCount++;
+      wuConnected = wifiClient.connect(host, 80);
+      // Wait before retrying
+      delay(RECONNECT_DELAY);
     }
-    else
+    if (wuConnected)
     {
       #ifdef VERBOSE      
       SERIALX.println("Weather Underground connected");
       #endif
-      sprintf(wundergroundState, "Connected");
+      if(wUAttemptCount == 0)
+      {
+        sprintf(wundergroundState, "Already Connected");
+      }
+      else
+      {
+        sprintf(wundergroundState, "Connected %d attempts", wUAttemptCount);
+      }      
+    }
+    else
+    {
+      #ifdef VERBOSE      
+      SERIALX.printf("Weather Underground connection failed after %d attempts\n", wUAttemptCount);
+      #endif
+      sprintf(wundergroundState, "Connect failed %d attempts", wUAttemptCount);
+      return;
     }
     // Issue the GET command to Weather Underground to post the data we've 
     //  collected.
@@ -708,11 +721,14 @@ void WU_Report()
     {
       if (millis() - timeout > 5000) 
       {
-        #ifdef VERBOSE      
+        //#ifdef VERBOSE      
         SERIALX.println(">>> WU Update - client Timeout !");
-        #endif
+        //#endif
         wifiClient.stop();
         sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
+        #ifdef VERBOSE      
+        SERIALX.println(url);
+        #endif
         return;
       }
     }
@@ -721,7 +737,9 @@ void WU_Report()
     while(wifiClient.available()) 
     {
       String line = wifiClient.readStringUntil('\r');
+      #ifdef VERBOSE      
       SERIALX.println(line);
+      #endif
       sprintf(wundergroundResponse, "%s", line);          
     }
     sprintf(wundergroundState, "%s %s", wundergroundState, wundergroundResponse);          
@@ -743,33 +761,49 @@ void MQTT_Report()
 {    
   if(mqtt_Report)
   {
-    #ifdef VERBOSE
-    SERIALX.println(">>>>>MQTT update ON<<<<<");    
-    SERIALX.println(payloadStr);
-    #endif
-    //
-    // MQTT update
-    //    
-    published_payload[0] = String(localTimeStr);
-    published_payload[1] = String(quarterHourRainInches, 4);
-    published_payload[2] = String(hourRainInches, 4);
-    published_payload[3] = String(dayRainInches, 4);
-    published_payload[4] = String(payloadStr);
-    #ifdef POWER_STATE_REPORTING
-    published_payload[ 5] = String(measuredV_ave[0]);
-    published_payload[ 6] = String(measuredV_min[0]); 
-    published_payload[ 7] = String(measuredV_max[0]);
-    published_payload[ 8] = String(measuredA_ave[0]);
-    published_payload[ 9] = String(measuredA_min[0]);
-    published_payload[10] = String(measuredA_max[0]);
-    published_payload[11] = String(measuredV_ave[1]);
-    published_payload[12] = String(measuredV_min[1]); 
-    published_payload[13] = String(measuredV_max[1]);
-    published_payload[14] = String(measuredA_ave[1]);
-    published_payload[15] = String(measuredA_min[1]);
-    published_payload[16] = String(measuredA_max[1]);
-    #endif      
-    MQTT_PublishTopics();    
+    if(MQTT_Reconnect())
+    {
+      #ifdef VERBOSE
+      SERIALX.println(">>>>>MQTT update ON, connected<<<<<");    
+      SERIALX.println(payloadStr);
+      #endif
+      //
+      // MQTT update
+      //    
+      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) | Weather Underground: %s (%s)",localTimeStr, 
+                                                                                                  wifiState, 
+                                                                                                  mqttState,
+                                                                                                  (mqtt_Report ? "Reporting" : "Not reporting"),
+                                                                                                  wundergroundState,
+                                                                                                  (wUnderground_Report ? "Reporting" : "Not reporting"));
+      published_payload[0] = String(localTimeStr);
+      published_payload[1] = String(quarterHourRainInches, 4);
+      published_payload[2] = String(hourRainInches, 4);
+      published_payload[3] = String(dayRainInches, 4);
+      published_payload[4] = String(payloadStr);
+      #ifdef POWER_STATE_REPORTING
+      published_payload[ 5] = String(measuredV_ave[0]);
+      published_payload[ 6] = String(measuredV_min[0]); 
+      published_payload[ 7] = String(measuredV_max[0]);
+      published_payload[ 8] = String(measuredA_ave[0]);
+      published_payload[ 9] = String(measuredA_min[0]);
+      published_payload[10] = String(measuredA_max[0]);
+      published_payload[11] = String(measuredV_ave[1]);
+      published_payload[12] = String(measuredV_min[1]); 
+      published_payload[13] = String(measuredV_max[1]);
+      published_payload[14] = String(measuredA_ave[1]);
+      published_payload[15] = String(measuredA_min[1]);
+      published_payload[16] = String(measuredA_max[1]);
+      #endif      
+      MQTT_PublishTopics();    
+    }
+    else
+    {
+      #ifdef VERBOSE
+      SERIALX.println(">>>>>MQTT update ON, failed to connect<<<<<");    
+      SERIALX.println(payloadStr);
+      #endif
+    }
   }
   else
   {
@@ -841,14 +875,13 @@ ICACHE_RAM_ATTR void RainGaugeTrigger()
 bool MQTT_Reconnect() 
 {
   // Loop until we're reconnected
-  int attemptCount = 0;
-  bool mqttConnect = true;
-  while (!mqttClient.connected() && (attemptCount < 100)) 
+  mqttAttemptCount = 0;
+  bool mqttConnect = mqttClient.connected();
+  while (!mqttConnect && (mqttAttemptCount < 10)) 
   {
     sprintf(mqttState, "Not connected");
-    mqttConnect = false;
     #ifdef VERBOSE
-    SERIALX.printf("MQTT connect attempt %d ", (attemptCount + 1));
+    SERIALX.printf("MQTT connect attempt %d ", (mqttAttemptCount + 1));
     SERIALX.print(" Server IP: >");
     SERIALX.print(mqttserverIP.toString());
     SERIALX.print("< Port: >");
@@ -861,18 +894,30 @@ bool MQTT_Reconnect()
     SERIALX.print(mqtt_password);
     SERIALX.println("<");
     #endif
-    // connected, subscribe and publish
-    if (mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str())) 
-    {
-      mqttConnect = true;
-      sprintf(mqttState, "Connected");
-      break;
-    }
     // Wait before retrying
     delay(RECONNECT_DELAY);
-    attemptCount++;
+    mqttConnect = mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str()); 
+    mqttAttemptCount++;
+    if(mqttConnect)
+    {
+      sprintf(mqttState, "Connected %d attempts", mqttAttemptCount);
+      delay(RECONNECT_DELAY);
+      // set up listeners for server updates  
+      MQTT_SubscribeTopics();
+    }
   }
-  if(!mqttConnect)
+  if(mqttConnect)
+  {
+    // we're connected
+    #ifdef VERBOSE
+    SERIALX.println("MQTT connected!");
+    #endif
+    if(mqttAttemptCount == 0)
+    {
+      sprintf(mqttState, "Already Connected");
+    }
+  }
+  else
   {
     SERIALX.print("MQTT not connected!");
     SERIALX.print(" Server IP: ");
@@ -885,15 +930,9 @@ bool MQTT_Reconnect()
     SERIALX.print(mqtt_user.c_str());
     SERIALX.print(" mqtt_password: ");
     SERIALX.println(mqtt_password.c_str());
-    return mqttConnect;
+    sprintf(mqttState, "Connect failed %d attempts", mqttAttemptCount);
   }
-  delay(RECONNECT_DELAY);
-  SERIALX.println("MQTT connected!");
-  // we're connected
-  // set up listeners for server updates  
-  MQTT_SubscribeTopics();
   return mqttConnect;
-
 }
 //****************************************************************************
 //
@@ -983,11 +1022,6 @@ void MQTT_SubscribeTopics()
 bool MQTT_PublishTopics()
 {
   bool connected = mqttClient.connected();
-  if (!connected)
-  {
-    connected = MQTT_Reconnect();
-  }
-  //
   if(!connected)
   {
     SERIALX.println("MQTT not connected in MQTT_PublishTopics()");
@@ -1216,7 +1250,9 @@ bool WiFi_Init()
   wifiConnected = (WiFi.status() == WL_CONNECTED);
   if(!wifiConnected)
   {
+      #ifdef VERBOSE    
       SERIALX.printf("Failed to connect after 10 attempts - reset credentials");
+      #endif
       ClearCredentials();
   }
   sprintf(wifiState, "Connected %s ",WiFi.localIP().toString().c_str());
