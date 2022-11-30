@@ -12,8 +12,6 @@
   brianbsmith.com
   info@brianbsmith.com
   
-  Copyright (c) 2022 Brian B Smith. All rights reserved.
-
   This is free software; you can redistribute it and/or
   modify it under the terms of the GNU Lesser General Public
   License as published by the Free Software Foundation; either
@@ -211,7 +209,6 @@ String published_topic[MAX_PUBLISH] = {  "Rain_Gauge/Date",
                                       };
 
 String published_payload[MAX_PUBLISH];
-char payloadStr[512];
 char mqttState[256];
 bool mqtt_Report = true;
 int mqttAttemptCount = 0;
@@ -233,7 +230,6 @@ char wundergroundState[256];
 bool wUnderground_Report = false;
 int wuSuccessfulReports = 0;
 int wuAttemptedReports = 0;
-
 int wUAttemptCount = 0;
 
 #ifdef POWER_STATE_REPORTING
@@ -257,12 +253,8 @@ unsigned long ina260LastMeasure = 0;
 #define LAST_X_DAYS 28
 #define LAST_X_HOURS 24
 #define INCHES_PER_CLICK 0.011F
-//#define INTERVAL_MS           60000 //    1 minute interval
-#define INTERVAL_MS            150000 //  2.5 minute interval
-//#define INTERVAL_MS          300000 //    5 minute interval
-//#define MAX_UPDATE_INTERVAL_MS 600000 //   10 minute max between updates
-//#define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
-#define MAX_UPDATE_INTERVAL_MS 600000 // 10 minute max between updates
+#define INTERVAL_MS            300000 //  2.5 minute interval
+#define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
 // rain for current minute, stored for 
 int rainByMinuteIdx = 0;                // current index of by minute rolling buffer
 unsigned int rainByMinute[MIN_PER_DAY]; // circular buffer for every minute value for last 24 hours
@@ -308,7 +300,7 @@ void setup()
   SERIALX.println("");
   SERIALX.println("BBS Nov 2022");
   SERIALX.println("IOT Rain gauge");
-  SERIALX.println("=======================");
+  SERIALX.println("==============");
   delay(1000);
   #endif
   // set CPU freq to 80MHz, disable bluetooth  to save power
@@ -673,8 +665,7 @@ void WU_Report()
     url += "&PASSWORD=";
     url += wUndergroundKey;
     url += "&dateutc=now&action=updateraw";
-    // Now let's add in the data that we've collected from our sensors
-    // Start with rain in last hour/day
+    // add data from sensors
     url += "&rainin=";
     url += hourRainInches;
     url += "&dailyrainin=";
@@ -716,8 +707,7 @@ void WU_Report()
       sprintf(wundergroundState, "Connect failed %d attempts", wUAttemptCount);
       return;
     }
-    // Issue the GET command to Weather Underground to post the data we've 
-    //  collected.
+    // Issue the GET command to Weather Underground to post the data
     wifiClient.print(String("GET ") + url + " HTTP/1.1\r\n" +
                "Host: " + host + "\r\n" +
                "Connection: close\r\n\r\n");
@@ -728,9 +718,9 @@ void WU_Report()
     {
       if (millis() - timeout > 5000) 
       {
-        //#ifdef VERBOSE      
+        #ifdef VERBOSE      
         SERIALX.println(">>> WU Update - client Timeout !");
-        //#endif
+        #endif
         wifiClient.stop();
         sprintf(wundergroundState, "%s %s", wundergroundState, " Weather Underground client timeout");          
         #ifdef VERBOSE      
@@ -744,9 +734,6 @@ void WU_Report()
     while(wifiClient.available()) 
     {
       String line = wifiClient.readStringUntil('\r');
-      #ifdef VERBOSE      
-      SERIALX.println(line);
-      #endif
       sprintf(wundergroundResponse, "%s", line);          
     }
     if(wundergroundResponse == "success");
@@ -770,6 +757,7 @@ void WU_Report()
 // report to MQTT Host
 void MQTT_Report()
 {    
+  char deviceStatusStr[256];
   if(mqtt_Report)
   {
     mqttAttemptedReports++;
@@ -779,7 +767,7 @@ void MQTT_Report()
       //
       // MQTT update
       //    
-      sprintf(payloadStr,"Connected %s | WiFi: %s | MQTT: %s (%s) %d/%d | Weather Underground: %s (%s) %d/%d",localTimeStr, 
+      sprintf(deviceStatusStr,"Connected %s | WiFi: %s | MQTT: %s (%s) %d/%d | Weather Underground: %s (%s) %d/%d",localTimeStr, 
                                                                                                   wifiState, 
                                                                                                   mqttState,
                                                                                                   (mqtt_Report ? "Reporting" : "Not reporting"),
@@ -791,13 +779,13 @@ void MQTT_Report()
                                                                                                   wuAttemptedReports);
       #ifdef VERBOSE
       SERIALX.println(">>>>>MQTT update ON, connected<<<<<");    
-      SERIALX.println(payloadStr);
+      SERIALX.println(deviceStatusStr);
       #endif
       published_payload[0] = String(localTimeStr);
       published_payload[1] = String(quarterHourRainInches, 4);
       published_payload[2] = String(hourRainInches, 4);
       published_payload[3] = String(dayRainInches, 4);
-      published_payload[4] = String(payloadStr);
+      published_payload[4] = String(deviceStatusStr);
       #ifdef POWER_STATE_REPORTING
       published_payload[ 5] = String(measuredV_ave[0]);
       published_payload[ 6] = String(measuredV_min[0]); 
@@ -818,13 +806,15 @@ void MQTT_Report()
     {
       #ifdef VERBOSE
       SERIALX.println(">>>>>MQTT update ON, failed to connect<<<<<");    
-      SERIALX.println(payloadStr);
+      SERIALX.println(deviceStatusStr);
       #endif
     }
   }
   else
   {
-    SERIALX.println(">>>>>MQTT update OFF<<<<<");    
+    #ifdef VERBOSE
+    SERIALX.println(">>>>>MQTT update OFF<<<<<");
+    #endif
   }
 }
 //
@@ -854,7 +844,7 @@ void AveragePowerValues()
   #endif    
 }      
 //
-//
+// zero power value if enabled
 //
 void ZeroPowerValues()
 {
@@ -915,13 +905,6 @@ bool MQTT_Reconnect()
     delay(RECONNECT_DELAY);
     mqttConnect = mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str()); 
     mqttAttemptCount++;
-    if(mqttConnect)
-    {
-      sprintf(mqttState, "Connected in %d attempts", mqttAttemptCount);
-      delay(RECONNECT_DELAY);
-      // set up listeners for server updates  
-      MQTT_SubscribeTopics();
-    }
   }
   if(mqttConnect)
   {
@@ -929,6 +912,10 @@ bool MQTT_Reconnect()
     #ifdef VERBOSE
     SERIALX.println("MQTT connected!");
     #endif
+    sprintf(mqttState, "Connected in %d attempts", mqttAttemptCount);
+    delay(RECONNECT_DELAY);
+    // set up listeners for server updates  
+    MQTT_SubscribeTopics();
     if(mqttAttemptCount == 0)
     {
       sprintf(mqttState, "Already Connected");
@@ -1098,9 +1085,6 @@ String LITTLEFS_ReadFile(fs::FS &fs, const char * path)
   while(file.available())
   {
     fileContent = file.readStringUntil('\n');
-    #ifdef VERBOSE
-    //SERIALX.println(fileContent);
-    #endif
   }
     #ifdef VERBOSE
     SERIALX.println("- read file");
@@ -1502,6 +1486,9 @@ void GetCredentials()
   });
   server.begin();
 }
+//
+// save credentials to files
+//
 void SaveCredentials()
 {
   LITTLEFS_WriteFile(LITTLEFS, ssidPath, ssid.c_str());
