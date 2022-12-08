@@ -970,10 +970,8 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
       wUnderground_Report = false;
     }
     #ifdef VERBOSE
-    SERIALX.printf("Weather Underground reporting %s - rain counts zeroed\n", wUnderground_Report ? "ON" : "OFF");
+    SERIALX.printf("Weather Underground reporting %s\n", wUnderground_Report ? "ON" : "OFF");
     #endif
-    // in either case, zero the rain stats
-    ZeroRainCounts();
   }
   if(topicStr == "Rain_Gauge/MQTT_RainGaugeMQTTReport")
   {
