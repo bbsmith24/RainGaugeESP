@@ -44,6 +44,7 @@
     added local time offset from GMT and daylight savings time offset to credentials page - hours now, could be enhanced with a combo box for timezone
 
 */
+#define HOSTNAME "RAIN_GAUGE"								  
 //#define VERBOSE                 // more output for debugging
 #define POWER_STATE_REPORTING  // use INA260 for reporting solar v/mA and microcontroller load V/mA to monitor charging state
 // wait between wifi and MQTT server connect attempts
@@ -73,6 +74,7 @@
 #include <ESP32Time.h>          // for RTC time https://github.com/fbiego/ESP32Time
 #include <ArduinoJson.h> // https://github.com/bblanchon/ArduinoJson
 #include <PubSubClient.h>
+#include <AsyncElegantOTA.h>
 #ifdef POWER_STATE_REPORTING
 #include <Adafruit_INA260.h>  // voltage/current
 #endif
@@ -140,7 +142,7 @@ char hour[4];
 char minute[4];
 char second[4];
 char localTimeStr[256];
-char connectDateTime[256];
+char connectTimeStr[256];
 bool connectDateTimeSet = false;
 bool rtcTimeSet = false;
 // Timer variables
@@ -207,7 +209,6 @@ String published_topic[MAX_PUBLISH] = {  "Rain_Gauge/Date",
                                          "RainGauge/SolarAMax",
   #endif
                                       };
-
 String published_payload[MAX_PUBLISH];
 char mqttState[256];
 bool mqtt_Report = true;
@@ -232,6 +233,9 @@ int wuSuccessfulReports = 0;
 int wuAttemptedReports = 0;
 int wUAttemptCount = 0;
 
+#define mqttReportPath "/mqttReporting.txt"
+#define wuReportPath "/wuReporting.txt"
+
 #ifdef POWER_STATE_REPORTING
 #define INA260_COUNT 2
 #define INA260_INTERVAL 10000
@@ -255,6 +259,7 @@ unsigned long ina260LastMeasure = 0;
 #define INCHES_PER_CLICK 0.011F
 #define INTERVAL_MS            300000 //  2.5 minute interval
 #define MAX_UPDATE_INTERVAL_MS 900000 // 15 minute max between updates
+unsigned long startDelay = 0;
 // rain for current minute, stored for 
 int rainByMinuteIdx = 0;                // current index of by minute rolling buffer
 unsigned int rainByMinute[MIN_PER_DAY]; // circular buffer for every minute value for last 24 hours
@@ -301,7 +306,9 @@ void setup()
   SERIALX.println("BBS Nov 2022");
   SERIALX.println("IOT Rain gauge");
   SERIALX.println("==============");
-  delay(1000);
+  startDelay = millis();
+  while((millis() - startDelay) < 1000)
+  {}
   #endif
   // set CPU freq to 80MHz, disable bluetooth  to save power
   #ifdef VERBOSE
@@ -341,7 +348,6 @@ void setup()
   #endif
   // uncomment to clear saved credentials 
   //ClearCredentials();
-
   // Load values saved in LITTLEFS if any
   LoadCredentials();
   //
@@ -354,6 +360,8 @@ void setup()
     SERIALX.println("No credentials stored - get from locally hosted page");
     #endif
     GetCredentials();
+    // initial MQTT connect - sets up subscriptions so MQTT on/off from server works
+    MQTT_Reconnect();    
   }
   
   // zero rain counters
@@ -409,6 +417,17 @@ void setup()
   #endif
   mqttClient.setServer(mqttserverIP, mqtt_portVal);
   mqttClient.setCallback(MQTT_Callback);
+  // OTA update server
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) 
+  {
+    request->send(200, "text/plain", "Hi! I am ESP32 - updated again!");
+  });
+  AsyncElegantOTA.begin(&server);    // Start ElegantOTA
+  server.begin();
+
+  #ifdef VERBOSE
+  SERIALX.println("Started OTA update page server");
+  #endif
 
   // get time
   UpdateLocalTime();
@@ -466,7 +485,8 @@ void loop()
        (dayRainInches != priorDayRainInches) ||
        ((now - lastUpdate) >= MAX_UPDATE_INTERVAL_MS))
     {
-      
+      // disable interrupts while reporting
+      noInterrupts();
       // average power values since last report
       AveragePowerValues();
       
@@ -483,12 +503,15 @@ void loop()
       priorQuarterHourRainInches = quarterHourRainInches;
       priorHourRainInches = hourRainInches;
       priorDayRainInches = dayRainInches;
-      neverUpdated = false;
-      lastUpdate = now;
+      // zero power values
       ZeroPowerValues();      
+      lastUpdate = now;
+      neverUpdated = false;
       #ifdef VERBOSE
       SERIALX.printf("time %d next update check at %d\n", millis(), (lastUpdate + INTERVAL_MS));    
       #endif
+      // re-enable interrupts
+      interrupts();
     }
   }
 }
@@ -515,7 +538,9 @@ void ZeroRainCounts()
   #ifdef VERBOSE
   SERIALX.println("Rain counts zeroed");
   #endif
-  delay(1000);
+  startDelay = millis();
+  while (millis() - startDelay < 1000) 
+  {}
 }
 //
 // read solar panel and battery charge start, if enabled
@@ -665,6 +690,7 @@ void WU_Report()
     url += "&PASSWORD=";
     url += wUndergroundKey;
     url += "&dateutc=now&action=updateraw";
+
     // add data from sensors
     url += "&rainin=";
     url += hourRainInches;
@@ -683,7 +709,9 @@ void WU_Report()
       wUAttemptCount++;
       wuConnected = wifiClient.connect(host, 80);
       // Wait before retrying
-      delay(RECONNECT_DELAY);
+      startDelay = millis();
+      while((millis() - startDelay) < RECONNECT_DELAY)
+      {}
     }
     if (wuConnected)
     {
@@ -696,7 +724,7 @@ void WU_Report()
       }
       else
       {
-        sprintf(wundergroundState, "Connected in %d attempts", wUAttemptCount);
+        sprintf(wundergroundState, "Connected");
       }      
     }
     else
@@ -704,7 +732,7 @@ void WU_Report()
       #ifdef VERBOSE      
       SERIALX.printf("Weather Underground connection failed after %d attempts\n", wUAttemptCount);
       #endif
-      sprintf(wundergroundState, "Connect failed %d attempts", wUAttemptCount);
+      sprintf(wundergroundState, "Connect failed");
       return;
     }
     // Issue the GET command to Weather Underground to post the data
@@ -771,6 +799,7 @@ void MQTT_Report()
                                                                                                   wifiState, 
                                                                                                   mqttState,
                                                                                                   (mqtt_Report ? "Reporting" : "Not reporting"),
+																											  
                                                                                                   mqttSuccessfulReports,
                                                                                                   mqttAttemptedReports,
                                                                                                   wundergroundState,
@@ -902,7 +931,9 @@ bool MQTT_Reconnect()
     SERIALX.println("<");
     #endif
     // Wait before retrying
-    delay(RECONNECT_DELAY);
+    startDelay = millis();
+    while((millis() - startDelay) < RECONNECT_DELAY)
+    {}
     mqttConnect = mqttClient.connect(mqttClientID.c_str(), mqtt_user.c_str(), mqtt_password.c_str()); 
     mqttAttemptCount++;
   }
@@ -912,14 +943,12 @@ bool MQTT_Reconnect()
     #ifdef VERBOSE
     SERIALX.println("MQTT connected!");
     #endif
-    sprintf(mqttState, "Connected in %d attempts", mqttAttemptCount);
-    delay(RECONNECT_DELAY);
+    sprintf(mqttState, "Connected");
+    startDelay = millis();
+    while (millis() - startDelay < RECONNECT_DELAY) 
+    {}
     // set up listeners for server updates  
     MQTT_SubscribeTopics();
-    if(mqttAttemptCount == 0)
-    {
-      sprintf(mqttState, "Already Connected");
-    }
   }
   else
   {
@@ -934,7 +963,7 @@ bool MQTT_Reconnect()
     SERIALX.print(mqtt_user.c_str());
     SERIALX.print(" mqtt_password: ");
     SERIALX.println(mqtt_password.c_str());
-    sprintf(mqttState, "Connect failed %d attempts", mqttAttemptCount);
+    sprintf(mqttState, "Connect failed");
   }
   return mqttConnect;
 }
@@ -964,10 +993,12 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
     if(payloadStr == "\"ON\"")
     {
       wUnderground_Report = true;
+      LITTLEFS_WriteFile(LITTLEFS, wuReportPath, "TRUE");
     }
     else
     {
       wUnderground_Report = false;
+      LITTLEFS_WriteFile(LITTLEFS, wuReportPath, "FALSE");
     }
     #ifdef VERBOSE
     SERIALX.printf("Weather Underground reporting %s\n", wUnderground_Report ? "ON" : "OFF");
@@ -978,10 +1009,12 @@ void MQTT_Callback(char* topic, byte* payload, unsigned int length)
     if(payloadStr == "\"ON\"")
     {
       mqtt_Report = true;
+      LITTLEFS_WriteFile(LITTLEFS, mqttReportPath, "TRUE");
     }
     else
     {
       mqtt_Report = false;
+      LITTLEFS_WriteFile(LITTLEFS, mqttReportPath, "FALSE");
     }
     #ifdef VERBOSE
     SERIALX.printf("MQTT reporting %s\n", mqtt_Report ? "ON" : "OFF");
@@ -1124,7 +1157,7 @@ void LITTLEFS_WriteFile(fs::FS &fs, const char * path, const char * message)
 void LITTLEFS_ListDir(fs::FS &fs, const char * dirname, uint8_t levels)
 {
     SERIALX.printf("Listing directory: %s\r\n", dirname);
-
+    
     File root = fs.open(dirname);
     if(!root)
     {
@@ -1198,7 +1231,7 @@ bool WiFi_Init()
   }
 
   WiFi.mode(WIFI_STA);
-
+  
   // for (optional) user defined gateway and local IP  
   localIP.fromString(ip.c_str());
   localGateway.fromString(gateway.c_str());
@@ -1223,13 +1256,15 @@ bool WiFi_Init()
     #endif
   }
   // set up and connect to wifi
+  WiFi.config(INADDR_NONE,INADDR_NONE,INADDR_NONE,INADDR_NONE);
+  WiFi.setHostname(HOSTNAME);
   WiFi.begin(ssid.c_str(), pass.c_str());
   #ifdef VERBOSE
   SERIALX.printf("Connecting to WiFi SSID: %s PWD: %s...", ssid.c_str(), pass.c_str());
   #endif
   unsigned long currentMillis = millis();
   previousMillis = currentMillis;
-
+  
   int retryCount = 0;
   previousMillis = millis();
   wifiConnected = true;
@@ -1254,7 +1289,7 @@ bool WiFi_Init()
       #endif
       ClearCredentials();
   }
-  sprintf(wifiState, "Connected %s ",WiFi.localIP().toString().c_str());
+  sprintf(wifiState, "%s (%s) Connected ",WiFi.localIP().toString().c_str(), WiFi.getHostname());
 
   #ifdef VERBOSE
   SERIALX.println(wifiState);
@@ -1281,7 +1316,7 @@ void LoadCredentials()
   
   gmtOffset_sec = atoi(tz.c_str()) * 3600; // convert hours to seconds
   daylightOffset_sec = atoi(dst.c_str()) * 3600; // convert hours to seconds
-
+  
   mqtt_server = LITTLEFS_ReadFile(LITTLEFS, mqtt_serverPath);
   mqtt_server.trim();
   mqttserverIP.fromString(mqtt_server);
@@ -1292,13 +1327,34 @@ void LoadCredentials()
   mqtt_user.trim();
   mqtt_password = LITTLEFS_ReadFile(LITTLEFS, mqtt_passwordPath);
   mqtt_password.trim();
-
-
+  
+  
   wUndergroundID = LITTLEFS_ReadFile(LITTLEFS, wu_IDPath);
   wUndergroundID.trim();
   wUndergroundKey = LITTLEFS_ReadFile(LITTLEFS, wu_KeyPath);
   wUndergroundKey.trim();
-  
+  // not from web page, set by user via MQTT  
+  String tmp;
+  tmp = LITTLEFS_ReadFile(LITTLEFS, mqttReportPath);
+  tmp.trim();
+  if(tmp == "TRUE")
+  {
+    mqtt_Report = true;
+  }
+  else
+  {
+    mqtt_Report = false;
+  }
+  tmp = LITTLEFS_ReadFile(LITTLEFS, wuReportPath);
+  tmp.trim();
+  if(tmp == "TRUE")
+  {
+    wUnderground_Report = true;
+  }
+  else
+  {
+    wUnderground_Report = false;
+  }
   LITTLEFS_ReadFile(LITTLEFS, "/wifimanager.html");
   #ifdef VERBOSE
   SERIALX.print("SSID: ");
@@ -1317,7 +1373,7 @@ void LoadCredentials()
   SERIALX.print(dst);
   SERIALX.print(" ");
   SERIALX.println(daylightOffset_sec);
-
+  
   SERIALX.println("MQTT credentials");
   SERIALX.print("Server: ");
   SERIALX.println(mqtt_server);
@@ -1327,13 +1383,16 @@ void LoadCredentials()
   SERIALX.println(mqtt_user);
   SERIALX.print("Password: ");
   SERIALX.println(mqtt_password);
-
+  
   SERIALX.println("Weather Underground credentials");
   SERIALX.print("ID : ");
   SERIALX.println(wUndergroundID);
   SERIALX.print("Key: ");
   SERIALX.println(wUndergroundKey);
-
+  SERIALX.print("MQTT Reporting: ");
+  SERIALX.println(mqtt_Report == true ? "ON" : "OFF");
+  SERIALX.print("WU Reporting: ");
+  SERIALX.println(wUnderground_Report == true? "ON" : "OFF");
   #endif
 }
 //
@@ -1556,7 +1615,9 @@ void ClearCredentials()
   #ifdef VERBOSE
   SERIALX.println("Restart...");
   #endif
-  delay(WIFI_WAIT);
+  startDelay = millis();
+  while((millis() - startDelay) < WIFI_WAIT)
+  {}
   ESP.restart();
 }
 // ================================ end WiFi initialize/credentials functions ================================
@@ -1566,8 +1627,9 @@ void ClearCredentials()
 //
 void UpdateLocalTime()
 {
-  if(!wifiConnected)
+  if((!wifiConnected) && (!rtcTimeSet))
   {
+    sprintf(localTimeStr, "Time not set, wifi not connected");
     return;
   }
   // if not set from NTP, get time and set RTC
@@ -1577,11 +1639,17 @@ void UpdateLocalTime()
     SERIALX.print("Time from NTP server ");
     #endif
     struct tm timeinfo;
-    if(!getLocalTime(&timeinfo))
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    // Init timeserver
+    unsigned long lastTimeCheck = millis();    
+    while(!getLocalTime(&timeinfo))
     {
-      // Init timeserver
-      configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-      getLocalTime(&timeinfo);
+      #ifdef VERBOSE
+      SERIALX.println("failed to get time from NTP");
+      #endif
+      while(millis() - lastTimeCheck < RECONNECT_DELAY)
+      {}
+      lastTimeCheck = millis();
     }
     //GET DATE
     strftime(dayMonth, sizeof(dayMonth), "%d", &timeinfo);
@@ -1598,7 +1666,7 @@ void UpdateLocalTime()
     hourNum = atoi(hour);
     minNum = atoi(minute);
     secondNum = atoi(second);
-
+    
     //rtc.setTime(secondNum, minNum, hourNum, dayNum, monthNum, yearNum);
     rtc.setTimeStruct(timeinfo);
     rtcTimeSet = true;
@@ -1630,7 +1698,7 @@ void UpdateLocalTime()
   sprintf(localTimeStr, "%02d/%02d/%04d %02d:%02d:%02d", monthNum, dayNum, yearNum, hourNum, minNum, secondNum);
   if(!connectDateTimeSet)
   {
-    strcpy(connectDateTime, localTimeStr);
+    strcpy(connectTimeStr, localTimeStr);
     connectDateTimeSet = true;
   }
   #ifdef VERBOSE
