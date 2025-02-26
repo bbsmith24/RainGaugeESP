@@ -56,8 +56,8 @@
 //#define ALT_SERIAL
 #define SERIALX Serial
 //#define SERIALX Serial2
-#define RXD2 16
-#define TXD2 17
+//#define RXD2 16
+//#define TXD2 17
 
 // for Sparkfun ESP32 Thing Plus
 //#define RAINGAUGE_PIN 5  
@@ -368,8 +368,8 @@ void setup()
   ZeroRainCounts();
   
   // set up the rising edge interrupt for the rain sensor
-  pinMode(RAINGAUGE_PIN, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
+  //pinMode(RAINGAUGE_PIN, INPUT_PULLUP);
+  //attachInterrupt(digitalPinToInterrupt(RAINGAUGE_PIN), RainGaugeTrigger, FALLING);  
 
   #ifdef POWER_STATE_REPORTING
   // if enabled, set up charge state reporting

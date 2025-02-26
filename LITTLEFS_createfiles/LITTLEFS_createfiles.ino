@@ -193,11 +193,8 @@ void setup(){
     Serial.println("----create the new again----");
     createDir(SPIFFS, "/mydir");
 	*/
-    Serial.println("----create and work with file----");
-    writeFile(SPIFFS, "/hello.txt", "Hello ");
-    appendFile(SPIFFS, "/hello.txt", "World!\n");
-
-
+    Serial.println("----create credentials and page files----");
+    //
     writeFile(SPIFFS, "/wifimanager.html", "<!DOCTYPE html>\n");
     appendFile(SPIFFS, "/wifimanager.html", "<html>\n");
     appendFile(SPIFFS, "/wifimanager.html", "<head>\n");
@@ -255,7 +252,7 @@ void setup(){
     appendFile(SPIFFS, "/wifimanager.html", "  </div>\n");
     appendFile(SPIFFS, "/wifimanager.html", "</body>\n");
     appendFile(SPIFFS, "/wifimanager.html", "</html>\n");
-
+    //
     writeFile(SPIFFS, "/style.css", "html {\n");
     appendFile(SPIFFS, "/style.css", "  font-family: Arial, Helvetica, sans-serif; \n");
     appendFile(SPIFFS, "/style.css", "  display: inline-block; \n");
@@ -365,10 +362,31 @@ void setup(){
     appendFile(SPIFFS, "/style.css", ".button-off:hover {\n");
     appendFile(SPIFFS, "/style.css", "  background-color: #252524;\n");
     appendFile(SPIFFS, "/style.css", "} \n");
+    //
+    writeFile(SPIFFS, "/ssid.txt", "FamilyRoom");
+    writeFile(SPIFFS, "/pass.txt", "ZoeyDora48375");
+    writeFile(SPIFFS, "/tz.txt", "-5");
+    writeFile(SPIFFS, "/dst.txt", "0");
+    writeFile(SPIFFS, "/mqtt_serverIP.txt", "192.168.1.76");
+    writeFile(SPIFFS, "/mqtt_port.txt", "1883");
+    writeFile(SPIFFS, "/mqtt_user.txt", "openhabian");
+    writeFile(SPIFFS, "/mqtt_password.txt", "SJnu12HMo");
+    writeFile(SPIFFS, "/wu_ID.txt", "KMINOVI53");
+    writeFile(SPIFFS, "/wu_Key.txt", "fQnoq2E");
+    writeFile(SPIFFS, "/wu_Report.txt", "false");
 
-    readFile(SPIFFS, "/hello.txt");
     readFile(SPIFFS, "/wifimanager.html");
     readFile(SPIFFS, "/style.css");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
+    readFile(SPIFFS, "/style.txt");
 
     Serial.println("----list 2----");
     listDir(SPIFFS, "/", 1);
